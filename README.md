@@ -24,9 +24,12 @@ make install    # into ~/.lv2, ~/.clap, ~/.vst3
 pw-jack bin/twirl   # the standalone (pw-jack with PipeWire)
 ```
 
-`make` applies `patches/` to DPF first (a fix not yet upstream: on Linux,
-Bitwig gives a CLAP the path of its binary, and DPF looked for `resources/`
-one folder too deep).
+`make` applies `patches/` to DPF first (fixes not yet upstream):
+- `0001`: on Linux, Bitwig gives a CLAP the path of its binary, and DPF
+  looked for `resources/` one folder too deep.
+- `0002`: closing the view, the web view's child process called into Qt from
+  its SIGTERM handler; it hung until SIGKILL (2 s) or crashed (SIGSEGV in
+  Qt's exit handlers, as Bitwig showed). It now leaves with `_exit(0)`.
 
 DPF's web view uses Qt WebEngine where it finds it (Qt 5, then 6), else
 WebKitGTK. It runs in its own process over X11 (XWayland is fine; for

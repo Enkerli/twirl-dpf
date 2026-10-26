@@ -1,0 +1,20 @@
+diff --git a/distrho/extra/WebViewImpl.cpp b/distrho/extra/WebViewImpl.cpp
+index 3a095153..6a031a8c 100644
+--- a/distrho/extra/WebViewImpl.cpp
++++ b/distrho/extra/WebViewImpl.cpp
+@@ -2618,9 +2618,12 @@ static void signalHandler(const int sig)
+     switch (sig)
+     {
+     case SIGTERM:
+-        if (webFramework != nullptr)
+-            webFramework->terminate();
+-        break;
++        // The host is closing the view. Calling into Qt or GTK from a signal
++        // handler isn't safe (Qt's quit() here could leave the loop running
++        // until SIGKILL), and unwinding afterwards ran Qt's exit handlers
++        // over objects already gone (SIGSEGV). This process holds nothing to
++        // save: leave at once, the kernel and X server clean up.
++        _exit(0);
+     }
+ }
+ 
