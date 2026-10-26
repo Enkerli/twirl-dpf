@@ -13,7 +13,8 @@ transport** takes the host's tempo, plays while its transport plays and on
 its beats.
 
 **Twirl keeps playing with its window closed**, and its sheet, Out choice
-and Follow host transport are **saved with the host's project**.
+and Follow host transport are **saved with the host's project**. Twenty of
+its controls are **host parameters**, automatable (below).
 
 Twirl's page isn't forked: `make` copies `apps/twirl/index.html` from a
 music-suite checkout beside this one (or `MUSIC_SUITE=…`), else downloads it
@@ -152,6 +153,40 @@ instead (exact, but ~120 ms late, through a jitter buffer); that left the
 plugin (Alex: "The option should leave the plugin (kept in the web
 versions)").
 
+## Parameters
+
+Twenty of the page's controls are the host's parameters, automatable and
+saved with the project (`TwirlParams.hpp`): Volume, Tempo, Follow host
+transport, Swing, Warmth, Air, Drone (on, level, voicing, space), Lock,
+Walk (on, way, pace), Sounds (the pack), Scale, Root, Vary, Evolve, Morph.
+Choices are lists with their names, switches on/off. The page holds the same
+list in the same order (`HOST_PARAMS`); both append only, as hosts keep
+parameters by number.
+
+- **Host → Twirl:** the plugin passes each change to the page within 10 ms,
+  window open or not; the page applies it as if its control had moved (so
+  the sound follows: the pack, the Drone…). Tempo does nothing while Follow
+  host transport is on.
+- **Twirl → host:** whatever changes a control in the page (a control, a
+  key, a scene, Start over) is reported to the plugin (checked 20 times a
+  second), and the plugin's window tells the host, each as a gesture, as a
+  knob would (DPF's `editParameter` and `setParameterValue`: the route that
+  works in every format; DPF's CLAP plugin-side change request is a stub).
+  That needs the window open: changes made while it's closed go when it next
+  opens. For 300 ms after the window tells the host a value, the host's
+  echoes of it are ignored (a slider being dragged doesn't jump back).
+- **With the project:** the page's saved state keeps the sheet; the plugin
+  sends the page all the parameters once it's ready and after any restore,
+  so **the parameters win**. (A project saved before the parameters existed
+  gets their defaults.)
+
+Checked in Carla (LV2 and VST3): the host sets them and the page follows
+(Kalimba, Dorian on G, the Drone and Walk on); with the window open, the
+page's own changes (tempo, pack) reach the host; saved, then loaded into a
+fresh instance whose tempo had been changed, the saved parameters came back.
+In VST3, DPF lists its 2,080 MIDI CC parameters (16 channels × 130) before
+Twirl's twenty.
+
 ## How the notes get to the host on time
 
 Twirl keeps its own clock in the page and schedules ahead (about 100 ms).
@@ -174,8 +209,8 @@ and the LV2 in `jalv`: every event within 0.1 ms of Twirl's own timing, sent
   open or not.
 - The plugin and its UI must share a process (DPF's direct access); hosts
   that run plugin UIs apart from the plugin won't show the page.
-- Follow host transport is saved with the project but isn't a host
-  parameter (not automatable).
+- The page tells the host about its own changes only while the window is
+  open (they go when it next opens).
 - Drums are General MIDI (kick 36, snare 38, hat 42, shaker 70): Bitwig's
   drum machine needs a note map for now.
 

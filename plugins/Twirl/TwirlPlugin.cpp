@@ -38,12 +38,24 @@
  * whether it's rolling and its beat at that moment's wall-clock time, and the
  * plugin hands that to the page 20 times a second (window.twirlHost); the
  * page lines its beats up with the host's.
+ *
+ * The host's parameters (TwirlParams.hpp, route C step 5) are the page's
+ * controls. From the host (setParameterValue, on the audio thread): marked,
+ * and the page's thread hands them to the page within 10 ms
+ * (window.twirlParams), which moves its controls. All of them go once the page
+ * is ready and after any restore of its saved state, so the parameters win.
+ * From the page (setState("params", "index,value;…"), whatever changed it):
+ * kept here, and the UI passes them to the host with a gesture (DPF's
+ * editParameter and setParameterValue), the route that works in every format
+ * (DPF's CLAP plugin-side change request is a stub). That needs the window
+ * open; changes made while it's closed go when it next opens.
  */
 
 #include "DistrhoPlugin.hpp"
 #include "DistrhoPluginUtils.hpp"
 #include "TwirlEngine.hpp"
 #include "TwirlPage.hpp"
+#include "TwirlParams.hpp"
 #include "TwirlShared.hpp"
 
 #include <atomic>
@@ -142,10 +154,12 @@ class TwirlPlugin : public Plugin, public TwirlPage::Listener, public TwirlPageA
 {
 public:
     TwirlPlugin()
-        : Plugin(0, 0, 1), // no parameters, no programs, one state: the page's
+        : Plugin(twirl::kParamCount, 0, 1), // no programs, one state: the page's
           fPage(*this)
     {
         std::memset(fSounding, 0, sizeof(fSounding));
+        for (uint32_t i = 0; i < twirl::kParamCount; ++i)
+            fParams[i].store(twirl::kParams[i].def);
     }
 
     ~TwirlPlugin() override
@@ -167,6 +181,57 @@ protected:
     const char* getHomePage() const override { return "https://github.com/Enkerli/twirl-dpf"; }
     const char* getLicense() const override { return "CC0-1.0"; }
     uint32_t getVersion() const override { return d_version(0, 1, 0); }
+
+   /* --------------------------------------------------------------------------------------------------------
+    * Parameters: the page's controls (TwirlParams.hpp) */
+
+    void initParameter(const uint32_t index, Parameter& parameter) override
+    {
+        if (index >= twirl::kParamCount)
+            return;
+        const twirl::ParamSpec& p = twirl::kParams[index];
+        parameter.hints = kParameterIsAutomatable;
+        if (p.kind != twirl::kFloat)
+            parameter.hints |= kParameterIsInteger;
+        if (p.kind == twirl::kSwitch)
+            parameter.hints |= kParameterIsBoolean;
+        parameter.name = p.name;
+        parameter.symbol = p.symbol;
+        parameter.unit = p.unit;
+        parameter.ranges.min = p.min;
+        parameter.ranges.max = p.max;
+        parameter.ranges.def = p.def;
+        if (p.kind == twirl::kChoice)
+        {
+            const uint32_t n = static_cast<uint32_t>(p.max) + 1;
+            parameter.enumValues.count = n;
+            parameter.enumValues.restrictedMode = true;
+            parameter.enumValues.values = new ParameterEnumerationValue[n];
+            for (uint32_t i = 0; i < n; ++i)
+            {
+                parameter.enumValues.values[i].value = static_cast<float>(i);
+                parameter.enumValues.values[i].label = p.choices[i];
+            }
+        }
+    }
+
+    float getParameterValue(const uint32_t index) const override
+    {
+        return index < twirl::kParamCount ? fParams[index].load() : 0.0f;
+    }
+
+    // From the host, perhaps on the audio thread: for the page. What the
+    // window told the host comes back as echoes: equal, or, while it's still
+    // moving, a step behind (ignored for a moment after the window's last).
+    void setParameterValue(const uint32_t index, const float value) override
+    {
+        if (index >= twirl::kParamCount || value == fParams[index].load())
+            return;
+        if (wallMs() - fParamToHostAt[index].load() < 300.0)
+            return;
+        fParams[index].store(value);
+        fParamsToPage.fetch_or(1u << index);
+    }
 
    /* --------------------------------------------------------------------------------------------------------
     * State: the page's, saved with the project */
@@ -199,6 +264,7 @@ protected:
         }
         if (fPageSaidReady)
             restorePage();
+        fParamsToPage.fetch_or(kAllParams);                      // after it: the parameters win
     }
 
    /* --------------------------------------------------------------------------------------------------------
@@ -255,13 +321,19 @@ protected:
             // The page has (re)loaded: it gets its saved state, if there is one.
             fPageSaidReady = true;
             restorePage();
+            fParamsToPage.fetch_or(kAllParams);                  // and then the host's parameters
         }
+        else if (std::strcmp(key, "params") == 0)
+            parseParams(value);
     }
 
     // Every 10 ms: the host's time for the page, 20 times a second.
     void pageIdle() override
     {
-        if (fPageStopping || ! fPageSaidReady || ++fIdleCount % 5 != 0)
+        if (fPageStopping || ! fPageSaidReady)
+            return;
+        sendParamsToPage();
+        if (++fIdleCount % 5 != 0)
             return;
         HostTime h;
         if (! readHostTime(h))
@@ -292,6 +364,19 @@ protected:
     void uiResize(const unsigned width, const unsigned height) override
     {
         fPage.resize(width, height);
+    }
+
+    uint32_t uiTakeParamChanges() override
+    {
+        return fParamsToHost.exchange(0);
+    }
+
+    float uiParamValue(const uint32_t index) override
+    {
+        if (index >= twirl::kParamCount)
+            return 0.0f;
+        fParamToHostAt[index].store(wallMs());
+        return fParams[index].load();
     }
 
    /* --------------------------------------------------------------------------------------------------------
@@ -489,6 +574,53 @@ private:
                 return true;
         }
         return false;
+    }
+
+    // The parameters: their values (as the page has them, or about to), which
+    // changed for the page and for the host, and when the window last told the host.
+    static constexpr uint32_t kAllParams = twirl::kParamCount == 32 ? ~0u : (1u << twirl::kParamCount) - 1;
+    std::atomic<float> fParams[twirl::kParamCount];
+    std::atomic<double> fParamToHostAt[twirl::kParamCount] {};
+    std::atomic<uint32_t> fParamsToPage { 0 }, fParamsToHost { 0 };
+
+    void sendParamsToPage()
+    {
+        const uint32_t changed = fParamsToPage.exchange(0);
+        if (changed == 0)
+            return;
+        std::string js = "window.twirlParams && twirlParams({";
+        char one[48];
+        const ScopedSafeLocale ssl;
+        for (uint32_t i = 0; i < twirl::kParamCount; ++i)
+            if (changed & (1u << i))
+            {
+                std::snprintf(one, sizeof(one), "%u:%.6g,", i, fParams[i].load());
+                js += one;
+            }
+        js += "})";
+        fPage.evaluate(js);
+    }
+
+    void parseParams(const char* s)
+    {
+        const ScopedSafeLocale ssl;
+        while (*s != '\0')
+        {
+            char* end;
+            const long i = std::strtol(s, &end, 10);
+            if (end == s || *end != ',')
+                return;
+            s = end + 1;
+            const float v = std::strtof(s, &end);
+            if (end == s)
+                return;
+            s = *end == ';' ? end + 1 : end;
+            if (i < 0 || i >= static_cast<long>(twirl::kParamCount) || ! std::isfinite(v))
+                continue;
+            const twirl::ParamSpec& p = twirl::kParams[i];
+            fParams[i].store(std::max(p.min, std::min(p.max, v)));
+            fParamsToHost.fetch_or(1u << i);
+        }
     }
 
     // The page and its saved state.

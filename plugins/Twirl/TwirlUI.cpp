@@ -2,6 +2,7 @@
  * Twirl as a plugin, the UI side: a window for Twirl's page, which the plugin
  * owns (TwirlPage.hpp). Opening moves the page into this window; closing
  * moves it back out first, so Twirl goes on playing with its sheet intact.
+ * While open, it tells the host what the page changed among its parameters.
  */
 
 #include "DistrhoUI.hpp"
@@ -34,6 +35,21 @@ protected:
     void parameterChanged(uint32_t, float) override {}
 
     void stateChanged(const char*, const char*) override {}
+
+    // What the page changed, to the host, each as a gesture (as a knob would).
+    void uiIdle() override
+    {
+        if (fPlugin == nullptr)
+            return;
+        const uint32_t changed = fPlugin->uiTakeParamChanges();
+        for (uint32_t i = 0; i < 32 && (changed >> i) != 0; ++i)
+            if (changed & (1u << i))
+            {
+                editParameter(i, true);
+                setParameterValue(i, fPlugin->uiParamValue(i));
+                editParameter(i, false);
+            }
+    }
 
     void onResize(const ResizeEvent& ev) override
     {
