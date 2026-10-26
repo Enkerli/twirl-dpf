@@ -136,6 +136,17 @@ a busy sheet in the heaviest pack (Chimes, 50 notes a second, ~120 voices)
 must take under a quarter of one core (it takes about 11 %). It writes
 `build/render/*.wav` for listening.
 
+**Synth mode.** MIDI coming into the plugin is played by the engine too,
+when Out includes sound: channel 1 pluck, 2 bell, 3 blip (these two an
+octave down, as Twirl sends them an octave up), 10 drums and shaker (36
+kick, 38 snare, 42 hat, 70 shaker, and General MIDI's neighbours by kind),
+any other channel pluck; in the sheet's pack, at the event's frame, window
+open or not. Note-offs are ignored: Twirl's voices are one-shots. It still
+passes through to the MIDI out. So one Twirl's MIDI into another plays its
+notes in the second's sound. Checked with two standalones: B, with no loops
+of its own, played A's notes in Kalimba while connected, and only Warmth's
+hiss once disconnected.
+
 Until 2026-10-26 the page streamed its own Web Audio into the plugin
 instead (exact, but ~120 ms late, through a jitter buffer); that left the
 plugin (Alex: "The option should leave the plugin (kept in the web

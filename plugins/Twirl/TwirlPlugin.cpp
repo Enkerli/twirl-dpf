@@ -14,7 +14,10 @@
  * Note-offs come from the page with Twirl's own lengths; the plugin only
  * counts what's sounding, so "panic" can end it (Start over, the page going).
  * MIDI arriving at the plugin (the host's, and the page's sendNote()) is
- * passed through at once.
+ * passed through at once, and, when Out includes sound, played by the engine
+ * too (synth mode): channel 1 pluck, 2 bell, 3 blip, 10 drums and shaker, any
+ * other pluck; in the sheet's pack, at the event's frame. So one Twirl's MIDI
+ * into another plays its notes in the second's sound.
  *
  * The sound is made here (route C, TwirlEngine.hpp). The page sends each
  * note it would have played, timed like the MIDI: setState("voices",
@@ -225,12 +228,15 @@ protected:
         else if (std::strcmp(key, "engine") == 0)
         {
             float volume = 0.8f, bpm = 96.0f, warmth = 0.5f;
+            int pack = 0, sound = 1;
             const ScopedSafeLocale ssl;
-            if (std::sscanf(value, "%f,%f,%f", &volume, &bpm, &warmth) >= 2)
+            if (std::sscanf(value, "%f,%f,%f,%d,%d", &volume, &bpm, &warmth, &pack, &sound) >= 2)
             {
                 fEngineVolume.store(volume);
                 fEngineBpm.store(bpm);
                 fEngineWarmth.store(warmth);
+                fEnginePack.store(static_cast<uint8_t>(std::max(0, std::min(pack, 6))));
+                fEngineSound.store(sound != 0);
             }
         }
         else if (std::strcmp(key, "drone") == 0)
@@ -361,6 +367,10 @@ protected:
             }
             ++i;
         }
+        // Synth mode: MIDI coming in, played by the engine at its frame.
+        if (fEngineSound.load(std::memory_order_relaxed))
+            for (uint32_t i = 0; i < midiInCount; ++i)
+                synthNote(midiIn[i]);
         fEngine.render(outputs[0], outputs[1], frames);
 
         // The host's time, for the page: its beat at this block's wall-clock time.
@@ -525,6 +535,34 @@ private:
     TimedVoice fVoicePending[kMaxPending];
     uint32_t fVoicePendingCount = 0;
     std::atomic<float> fEngineVolume { 0.8f }, fEngineBpm { 96.0f }, fEngineWarmth { 0.5f };
+    std::atomic<uint8_t> fEnginePack { 0 };
+    std::atomic<bool> fEngineSound { true };
+
+    /** A note-on coming in, as Twirl would have played it (note-offs: its voices ring out). */
+    void synthNote(const MidiEvent& ev) noexcept
+    {
+        if (ev.size < 3 || (ev.data[0] & 0xF0) != 0x90 || ev.data[2] == 0)
+            return;
+        const uint8_t ch = ev.data[0] & 0x0F, note = ev.data[1] & 0x7F;
+        twirl::NoteSpec spec { twirl::kPluck, fEnginePack.load(std::memory_order_relaxed), static_cast<float>(note),
+                               ev.data[2] / 127.0f, 0.0f, 0.5f, 0.0f };
+        switch (ch)
+        {
+        case 1: spec.voice = twirl::kBell; spec.midi -= 12; break; // Twirl sends bell and blip an octave up
+        case 2: spec.voice = twirl::kBlip; spec.midi -= 12; break;
+        case 9:
+            // Drums by note: Twirl's (36 kick, 38 snare, 42 hat, 70 shaker) and General MIDI's neighbours.
+            // Their height picks the kind; the pitch tunes it (Twirl's drums are pitched).
+            spec.midi = 60;
+            if (note == 69 || note == 70 || note == 82) { spec.voice = twirl::kShake; spec.y = 0.5f; }
+            else if (note <= 36) { spec.voice = twirl::kDrum; spec.y = 0.8f; }
+            else if (note == 42 || note == 44 || note == 46 || note >= 49) { spec.voice = twirl::kDrum; spec.y = 0.1f; }
+            else { spec.voice = twirl::kDrum; spec.y = 0.45f; }
+            break;
+        default: break; // channel 1, and any other: pluck
+        }
+        fEngine.play(spec, static_cast<int>(ev.frame));
+    }
     std::atomic<uint32_t> fDroneSeq { 0 };
     twirl::DroneSpec fDroneShared;   // written by the page's thread inside the seqlock
     uint32_t fDroneSeen = 0;
