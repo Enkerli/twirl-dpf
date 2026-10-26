@@ -88,13 +88,18 @@ second (`twirlHost`), with the measured audio lag. With **Follow host
 transport** on, Twirl takes the tempo, holds its loops (and the Drone) while
 the transport is stopped (strokes still sound as you draw), and keeps its
 beat on the host's, modulo 48 beats (whole bars in 2/4, 3/4, 4/4, 6/8):
-jumping when the host starts or moves, easing a quarter of the way each
-report otherwise. With its own sound going to the host, it plays early by
+jumping when the host starts or moves; otherwise averaging the error over
+about a second and correcting it only past 2 ms (each report's measure is
+noisy, ±10 ms; correcting every one moved every note by a few ms, which
+sounded unquantized). While the host is stopped, gives no transport, or
+stops calling the plugin, Twirl's clock stands still. With its own sound going to the host, it plays early by
 the audio lag, so the sound lands on the beat; with sound and MIDI, the MIDI
 is delayed by the same, so the two agree.
 
-Measured against Carla's transport: on the host's beat within 0.3–2 ms at
-120 and 140 BPM and after a jump; held while stopped. The page's clock and
+Measured against Carla's transport at 120 BPM: Twirl's timing moves 0.03–0.08
+ms per 100 ms on average (1.6 ms at most), and sits on the host's beat
+within 2 ms on average; follows a tempo change and a jump; held while
+stopped. The page's clock and
 the plugin's agree (host reports arrive 12–37 ms after they're stamped).
 
 ## Channels
