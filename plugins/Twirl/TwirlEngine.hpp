@@ -8,8 +8,9 @@
  * to sound that close to the current one, as long as it sounds ok."
  *
  * Step 1: Paper's five voices (every pack plays them for now), the delay,
- * the volume and a compressor. Real-time safe: a fixed pool of voices, no
- * allocation, no locks.
+ * the volume and a compressor. Step 3 (first, as Alex asked): the Drone and
+ * Warmth's room (hiss, crackle, wow and flutter). Real-time safe: fixed
+ * pools, no allocation, no locks.
  */
 
 #ifndef TWIRL_ENGINE_HPP_INCLUDED
@@ -159,6 +160,17 @@ struct NoteSpec {
 
 enum : uint8_t { kPluck = 0, kBell, kBlip, kDrum, kShake };
 
+/** The Drone as the page has it now (its notes already through scale, root,
+ *  Walk; its "space" as numbers: Twirl's DRONE_SPACES). */
+struct DroneSpec {
+    static constexpr int kMaxNotes = 8;
+    bool on = false;
+    float level = 0.3f;            // the slider (0..1); the gain is 0.1 × level²
+    float side = 0.35f, rate = 0.031f, panSwing = 0.35f, trem = 0.0f, dop = 0.0f, split = 0.0f;
+    int count = 0;
+    float freq[kMaxNotes] = {};    // Hz
+};
+
 /** One sounding note. Its parts depend on what it is; unused ones stay idle. */
 struct Voice {
     bool active = false;
@@ -195,6 +207,7 @@ public:
         fSr = sr;
         fDelay.assign(sr);
         fDelayLp.set(Filter::Lowpass, 2400.0, 1.0, sr); // Web Audio's default Q (1 dB)
+        roomSetup();
         reset();
     }
 
@@ -204,9 +217,37 @@ public:
         fDelay.clear();
         fDelayLp.reset();
         fEnvelope = 0.0;
+        fDrone.sounding = false;
     }
 
     void setVolume(const float v) noexcept { fVolumeTarget = std::max(0.0f, std::min(2.0f, v)); }
+    void setWarmth(const float w) noexcept { fWarmth = std::max(0.0f, std::min(1.0f, w)); }
+
+    /** The Drone: on, off, its notes (gliding there), its level and space. */
+    void setDrone(const DroneSpec& d) noexcept
+    {
+        Drone& z = fDrone;
+        const bool fresh = d.on && (! z.sounding || d.count != z.spec.count);
+        z.spec = d;
+        z.spec.count = std::max(0, std::min(d.count, DroneSpec::kMaxNotes));
+        if (fresh)
+        {
+            // Two saws a note, 6 cents either side, and ±3 cents note to note (as the page's).
+            for (int i = 0; i < z.spec.count; ++i)
+                for (int j = 0; j < 2; ++j)
+                {
+                    z.saw[i][j].wave = Wave::Saw;
+                    z.saw[i][j].phase = fRand.next();
+                    z.cents[i][j] = (j ? 6.0f : -6.0f) + (i % 2 ? 3.0f : -3.0f);
+                    z.freq[i][j] = d.freq[i] + (j ? 1 : -1) * d.split / 2;
+                }
+            z.gain.set(0.0001);
+            z.gain.rampTo(droneGain(d.level), 2.0 * fSr);   // swells in over 2 s
+            z.lp[0].reset(); z.lp[1].reset();
+            z.sounding = true;
+        }
+        z.fading = ! d.on;
+    }
     void setTempo(const double bpm) noexcept { if (bpm > 0) fDelaySeconds = 0.75 * 60.0 / bpm; }
 
     /** Start a note `offset` samples into the next render. */
@@ -323,13 +364,27 @@ public:
                     v.active = false;
             }
 
+            double droneL = 0, droneR = 0;
+            if (fDrone.sounding)
+            {
+                droneTick(droneL, droneR);
+                wet += (droneL + droneR) * 0.5 * 0.35;
+            }
+
             // The delay: a dotted eighth, darkened each time round (Twirl's delaySend 0.28, feedback 0.38).
             const double echoed = fDelayLp.next(fDelay.read(delaySamples));
             fDelay.write(wet * 0.28 + echoed * 0.38);
 
-            // Volume (smoothed), then the compressor.
+            // The room (Warmth): hiss and crackle into the master, then the whole
+            // mix through a drifting delay (wow and flutter), as the page's.
+            double hissL = 0, hissR = 0;
+            if (fWarmth > 0.0f)
+                roomTick(hissL, hissR);
+
+            // Volume (smoothed), the wobble, then the compressor.
             fVolume += (fVolumeTarget - fVolume) * 0.001;
-            double l = (dryL + echoed) * fVolume, r = (dryR + echoed) * fVolume;
+            double l = (dryL + droneL + echoed + hissL) * fVolume, r = (dryR + droneR + echoed + hissR) * fVolume;
+            wobble(l, r);
             const double g = compress(std::max(std::fabs(l), std::fabs(r)));
             outL[i] += static_cast<float>(l * g);
             outR[i] += static_cast<float>(r * g);
@@ -360,6 +415,171 @@ private:
         void write(const double x) noexcept { buf[pos] = static_cast<float>(x); if (++pos >= size) pos = 0; }
     } fDelay;
     Biquad fDelayLp;
+
+    float fWarmth = 0.5f;
+
+    // ---- the Drone --------------------------------------------------------
+    struct Drone {
+        DroneSpec spec;
+        bool sounding = false, fading = false;
+        Osc saw[DroneSpec::kMaxNotes][2];
+        float cents[DroneSpec::kMaxNotes][2] = {};
+        double freq[DroneSpec::kMaxNotes][2] = {};    // gliding toward the spec's
+        ExpRamp gain;
+        Biquad lp[2];
+        double lfo = 0, rotor = 0, wob = 0, wobRate = 0.19;
+        int every = 0;
+        float rd[512] = {}; int rdPos = 0;          // the rotor's moving delay (Doppler), ~10 ms
+    } fDrone;
+
+    static double droneGain(const float level) noexcept { return std::max(0.0002, 0.1 * level * level); }
+
+    void droneTick(double& outL, double& outR) noexcept
+    {
+        Drone& z = fDrone;
+        const DroneSpec& d = z.spec;
+        const double sr = fSr;
+        // Level: toward the slider's (or toward silence, fading out over ~1 s).
+        const double target = z.fading ? 0.0001 : droneGain(d.level);
+        if (z.gain.left == 0)
+            z.gain.value += (target - z.gain.value) * (1.0 / (0.3 * sr));
+        const double g = z.gain.next();
+        if (z.fading && g < 0.0003) { z.sounding = false; return; }
+
+        // Slow wheels: the cutoff's breath (0.06 Hz, ±350 Hz), the rotor, the tape wobble.
+        z.lfo += 0.06 / sr; z.lfo -= std::floor(z.lfo);
+        z.rotor += d.rate / sr; z.rotor -= std::floor(z.rotor);
+        z.wob += z.wobRate / sr; z.wob -= std::floor(z.wob);
+        if (z.every-- <= 0)
+        {
+            const double cut = 800.0 + 350.0 * std::sin(2 * kPi * z.lfo);
+            z.lp[0].set(Filter::Lowpass, cut, -3.1, sr); // Q 0.7 (as the page's), in dB
+            z.lp[1].set(Filter::Lowpass, cut, -3.1, sr);
+            z.every = 31;
+        }
+        const double wobCents = 5.0 * fWarmth * std::sin(2 * kPi * z.wob);
+
+        double side[2] = { 0, 0 };
+        for (int i = 0; i < d.count; ++i)
+            for (int j = 0; j < 2; ++j)
+            {
+                const double want = d.freq[i] + (j ? 1 : -1) * d.split / 2;
+                z.freq[i][j] += (want - z.freq[i][j]) * (1.0 / (0.4 * sr)); // glide (setTargetAtTime, 0.4 s)
+                const double f = z.freq[i][j] * std::pow(2.0, (z.cents[i][j] + wobCents) / 1200.0);
+                side[j] += z.saw[i][j].next(f, sr);
+            }
+        // Each side through its lowpass, panned to its side.
+        double l = 0, r = 0;
+        for (int j = 0; j < 2; ++j)
+        {
+            const double x = z.lp[j].next(side[j]) * g;
+            const double p = ((j ? 1 : -1) * d.side + 1.0) * 0.5;
+            l += x * std::cos(p * kPi / 2);
+            r += x * std::sin(p * kPi / 2);
+        }
+        // The rotor: a moving delay (Doppler), a swinging pan, a swelling level.
+        const double wheel = std::sin(2 * kPi * z.rotor);
+        double mono = (l + r) * 0.5;
+        z.rd[z.rdPos] = static_cast<float>(mono);
+        const double back = (0.002 + d.dop * wheel) * sr;
+        const double pos = z.rdPos - std::max(1.0, std::min(500.0, back));
+        const int p0 = static_cast<int>(std::floor(pos)), q0 = (p0 + 512) % 512, q1 = (q0 + 1) % 512;
+        const double fr = pos - std::floor(pos);
+        mono = z.rd[q0] + (z.rd[q1] - z.rd[q0]) * fr;
+        z.rdPos = (z.rdPos + 1) % 512;
+        const double swing = d.panSwing * wheel, tremGain = 1.0 - d.trem + d.trem * wheel;
+        const double width = 0.5 * (l - r);
+        l = (mono + width) * tremGain; r = (mono - width) * tremGain;
+        // Pan as a balance (the page pans the stereo drone with a StereoPanner).
+        const double pp = (swing + 1.0) * 0.5;
+        outL = l * std::cos(pp * kPi / 2) * 1.41421356;
+        outR = r * std::sin(pp * kPi / 2) * 1.41421356;
+    }
+
+    // ---- the room ---------------------------------------------------------
+    struct Room {
+        double b[2][7] = {};            // pink noise (Paul Kellet's), per channel
+        double pinkScale = 1.0;         // to an RMS of 0.2, as the page's
+        Biquad hissHp[2], hissLp[2], crackleHp[2];
+        int tick = 0, tickLen = 0; double tickAmp = 0; float where = 0.5f;
+        float line[2][4096] = {}; int pos = 0; // the wobble's delay, ~85 ms at 48 kHz
+        double wow = 0, flutter = 0;
+    } fRoom;
+
+    void roomSetup() noexcept
+    {
+        Room& m = fRoom;
+        for (int c = 0; c < 2; ++c)
+        {
+            m.hissHp[c].set(Filter::Highpass, 60.0, 1.0, fSr);
+            m.hissLp[c].set(Filter::Lowpass, 7000.0, 1.0, fSr);
+            m.crackleHp[c].set(Filter::Highpass, 1200.0, 1.0, fSr);
+        }
+        // Measure the pink filter's level once, to scale it to an RMS of 0.2.
+        double sq = 0;
+        for (int i = 0; i < 48000; ++i) { const double x = pink(0); sq += x * x; }
+        m.pinkScale = 0.2 / std::sqrt(sq / 48000.0);
+        std::memset(m.b, 0, sizeof(m.b));
+    }
+
+    double pink(const int c) noexcept
+    {
+        double* const b = fRoom.b[c];
+        const double w = fRand.bipolar();
+        b[0] = 0.99886 * b[0] + w * 0.0555179; b[1] = 0.99332 * b[1] + w * 0.0750759; b[2] = 0.969 * b[2] + w * 0.153852;
+        b[3] = 0.8665 * b[3] + w * 0.3104856; b[4] = 0.55 * b[4] + w * 0.5329522; b[5] = -0.7616 * b[5] - w * 0.016898;
+        const double y = b[0] + b[1] + b[2] + b[3] + b[4] + b[5] + b[6] + w * 0.5362;
+        b[6] = w * 0.115926;
+        return y;
+    }
+
+    void roomTick(double& outL, double& outR) noexcept
+    {
+        Room& m = fRoom;
+        const double w = fWarmth;
+        // Hiss: pink noise, 60 Hz to 7 kHz, near -58 dB at Warmth 0.5.
+        for (int c = 0; c < 2; ++c)
+        {
+            const double h = m.hissLp[c].next(m.hissHp[c].next(pink(c) * m.pinkScale)) * 0.012 * w;
+            (c ? outR : outL) += h;
+        }
+        // Crackle: about nine ticks in 17 s, one in five a pop, some in one ear.
+        if (m.tickLen == 0 && fRand.next() < 9.0 / (17.0 * fSr))
+        {
+            const bool pop = fRand.next() < 0.2f;
+            m.tickLen = static_cast<int>(pop ? 60 + fRand.next() * 120 : 6 + fRand.next() * 24);
+            m.tickAmp = pop ? 1.0 : 0.3 + fRand.next() * 0.5;
+            m.tick = 0;
+            m.where = fRand.next();
+        }
+        double cl = 0, cr = 0;
+        if (m.tickLen > 0)
+        {
+            const double v = m.tickAmp * std::exp(-m.tick / (m.tickLen / 4.0)) * (m.tick % 2 ? -1 : 1) * (0.6 + fRand.next() * 0.4);
+            if (m.where < 0.7f) cl = v;
+            if (m.where > 0.3f) cr = v;
+            if (++m.tick >= m.tickLen) m.tickLen = 0;
+        }
+        outL += m.crackleHp[0].next(cl) * 0.03 * w;
+        outR += m.crackleHp[1].next(cr) * 0.03 * w;
+    }
+
+    /** Wow (0.45 Hz) and flutter (6.3 Hz): the mix through a delay of 3 ms that drifts, scaled by Warmth. */
+    void wobble(double& l, double& r) noexcept
+    {
+        Room& m = fRoom;
+        m.line[0][m.pos] = static_cast<float>(l);
+        m.line[1][m.pos] = static_cast<float>(r);
+        m.wow += 0.45 / fSr; m.wow -= std::floor(m.wow);
+        m.flutter += 6.3 / fSr; m.flutter -= std::floor(m.flutter);
+        const double d = (0.003 + fWarmth * (0.0003 * std::sin(2 * kPi * m.wow) + 0.00001 * std::sin(2 * kPi * m.flutter))) * fSr;
+        const double at = m.pos - d;
+        const int i0 = static_cast<int>(std::floor(at)), a = (i0 % 4096 + 4096) % 4096, b = (a + 1) % 4096;
+        const double fr = at - std::floor(at);
+        l = m.line[0][a] + (m.line[0][b] - m.line[0][a]) * fr;
+        r = m.line[1][a] + (m.line[1][b] - m.line[1][a]) * fr;
+        m.pos = (m.pos + 1) % 4096;
+    }
 
     /** A free voice, or the oldest-sounding one. */
     Voice& take() noexcept

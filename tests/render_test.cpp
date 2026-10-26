@@ -46,6 +46,7 @@ int main()
     {
         engine.setSampleRate(sr);
         engine.setTempo(96);
+        engine.setWarmth(0.0f); // the voices alone: Warmth's hiss never dies away (that's its point)
         std::vector<float> L, R;
         // A phrase: pitches and loudnesses across the range, one every 0.4 s;
         // drums go through hat, snare and kick by height.
@@ -91,6 +92,74 @@ int main()
         std::printf("%-6s peak %.3f  rms %.4f  last 0.5 s %.6f  %s\n", names[voice], peak, rms, tail, ok ? "ok" : "FAIL");
         failures += ok ? 0 : 1;
         writeWav(std::string("build/render/") + names[voice] + ".wav", L, R, sr);
+    }
+
+    // Render `seconds` into L/R (appending).
+    auto run = [&](std::vector<float>& L, std::vector<float>& R, const double seconds) {
+        for (int k = 0; k < static_cast<int>(seconds * sr / block); ++k)
+        {
+            float l[block] = {}, r[block] = {};
+            engine.render(l, r, block);
+            L.insert(L.end(), l, l + block); R.insert(R.end(), r, r + block);
+        }
+    };
+    auto stats = [&](const std::vector<float>& L, const std::vector<float>& R, const size_t from, const size_t to, double& peak, double& rms, bool& finite) {
+        double sum = 0; peak = 0; finite = true;
+        for (size_t i = from; i < to; ++i)
+        {
+            finite = finite && std::isfinite(L[i]) && std::isfinite(R[i]);
+            peak = std::max(peak, static_cast<double>(std::max(std::fabs(L[i]), std::fabs(R[i]))));
+            sum += L[i] * L[i] + R[i] * R[i];
+        }
+        rms = std::sqrt(sum / (2.0 * (to - from)));
+    };
+
+    // The Drone: a fifth (C2, G2) at its default level, swelling in, playing,
+    // gliding to a new chord (as Walk moves it), then off: it fades away.
+    {
+        engine.setSampleRate(sr);
+        engine.setWarmth(0.0f);
+        std::vector<float> L, R;
+        DroneSpec d;
+        d.on = true; d.level = 0.3f; d.count = 2; d.freq[0] = 65.41f; d.freq[1] = 98.0f;
+        engine.setDrone(d);
+        run(L, R, 4.0);
+        d.freq[0] = 73.42f; d.freq[1] = 110.0f;  // Walk: up a tone
+        engine.setDrone(d);
+        run(L, R, 3.0);
+        double peak, rms, endPeak, endRms; bool finite, f2;
+        stats(L, R, 2 * sr, L.size(), peak, rms, finite);
+        d.on = false;
+        engine.setDrone(d);
+        const size_t off = L.size();
+        run(L, R, 4.0);
+        stats(L, R, L.size() - sr / 2, L.size(), endPeak, endRms, f2);
+        const bool ok = finite && f2 && rms > 0.003 && peak < 0.5 && endPeak < 0.0005;
+        std::printf("drone  peak %.3f  rms %.4f  after off %.6f  %s\n", peak, rms, endPeak, ok ? "ok" : "FAIL");
+        failures += ok ? 0 : 1;
+        (void)off;
+        writeWav("build/render/drone.wav", L, R, sr);
+    }
+
+    // Warmth, alone: the hiss and the odd crackle, felt more than heard
+    // (the page's: near -58 dB at 0.5), and nothing at 0.
+    {
+        engine.setSampleRate(sr);
+        std::vector<float> L, R;
+        engine.setWarmth(0.5f);
+        run(L, R, 17.0);
+        double peak, rms; bool finite;
+        stats(L, R, sr, L.size(), peak, rms, finite);
+        const double db = 20 * std::log10(std::max(1e-9, rms));
+        engine.setWarmth(0.0f);
+        std::vector<float> L0, R0;
+        run(L0, R0, 1.0);
+        double p0, r0; bool f0;
+        stats(L0, R0, sr / 10, L0.size(), p0, r0, f0);   // past the wobble's few ms
+        const bool ok = finite && db > -70 && db < -50 && peak < 0.1 && p0 < 1e-6;
+        std::printf("warmth rms %.1f dB  peak %.4f  at 0: %.1e  %s\n", db, peak, p0, ok ? "ok" : "FAIL");
+        failures += ok ? 0 : 1;
+        writeWav("build/render/warmth.wav", L, R, sr);
     }
     return failures;
 }

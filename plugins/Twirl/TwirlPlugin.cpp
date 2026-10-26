@@ -29,9 +29,11 @@
  *
  * Route C (TwirlEngine.hpp): Twirl's sound made here. The page sends each
  * note it would have played, timed like the MIDI: setState("voices",
- * "t,voice,pack,midi,vel,pan,y,nuance;…"), and the volume and tempo as
- * setState("engine", "volume,bpm"); the engine plays them at their sample
- * offsets, mixed with whatever the page still streams.
+ * "t,voice,pack,midi,vel,pan,y,nuance;…"), the volume, tempo and Warmth as
+ * setState("engine", "volume,bpm,warmth"), and the Drone as setState("drone",
+ * "on,level,side,rate,pan,trem,dop,split,hz,hz…"); the engine plays them,
+ * the notes at their sample offsets, mixed with whatever the page still
+ * streams.
  *
  * The page belongs to the plugin, not to its window (TwirlPage.hpp): it runs
  * from activate() to the end, window open or not, and its messages come here
@@ -333,14 +335,17 @@ protected:
             parseVoices(value);
         else if (std::strcmp(key, "engine") == 0)
         {
-            float volume = 0.8f, bpm = 96.0f;
+            float volume = 0.8f, bpm = 96.0f, warmth = 0.5f;
             const ScopedSafeLocale ssl;
-            if (std::sscanf(value, "%f,%f", &volume, &bpm) == 2)
+            if (std::sscanf(value, "%f,%f,%f", &volume, &bpm, &warmth) >= 2)
             {
                 fEngineVolume.store(volume);
                 fEngineBpm.store(bpm);
+                fEngineWarmth.store(warmth);
             }
         }
+        else if (std::strcmp(key, "drone") == 0)
+            parseDrone(value);
         else if (std::strcmp(key, "notes") == 0)
             parseNotes(value);
         else if (std::strcmp(key, "panic") == 0)
@@ -443,6 +448,20 @@ protected:
         // Route C: the page's notes, played here at their sample offsets.
         fEngine.setVolume(fEngineVolume.load(std::memory_order_relaxed));
         fEngine.setTempo(fEngineBpm.load(std::memory_order_relaxed));
+        fEngine.setWarmth(fEngineWarmth.load(std::memory_order_relaxed));
+        {
+            // The Drone, when the page has changed it (a seqlock: retried next block if mid-write).
+            const uint32_t seq = fDroneSeq.load(std::memory_order_acquire);
+            if (seq != fDroneSeen && (seq & 1) == 0)
+            {
+                const twirl::DroneSpec d = fDroneShared;
+                if (fDroneSeq.load(std::memory_order_acquire) == seq)
+                {
+                    fEngine.setDrone(d);
+                    fDroneSeen = seq;
+                }
+            }
+        }
         TimedVoice tv;
         while (fVoicePendingCount < kMaxPending && fVoiceRing.pop(tv))
             fVoicePending[fVoicePendingCount++] = tv;
@@ -661,7 +680,34 @@ private:
     VoiceRing<4096> fVoiceRing;
     TimedVoice fVoicePending[kMaxPending];
     uint32_t fVoicePendingCount = 0;
-    std::atomic<float> fEngineVolume { 0.8f }, fEngineBpm { 96.0f };
+    std::atomic<float> fEngineVolume { 0.8f }, fEngineBpm { 96.0f }, fEngineWarmth { 0.5f };
+    std::atomic<uint32_t> fDroneSeq { 0 };
+    twirl::DroneSpec fDroneShared;   // written by the page's thread inside the seqlock
+    uint32_t fDroneSeen = 0;
+
+    // "on,level,side,rate,pan,trem,dop,split,hz,hz…"
+    void parseDrone(const char* s) noexcept
+    {
+        twirl::DroneSpec d;
+        const ScopedSafeLocale ssl;
+        int on = 0, used = 0;
+        if (std::sscanf(s, "%d,%f,%f,%f,%f,%f,%f,%f%n", &on, &d.level, &d.side, &d.rate, &d.panSwing, &d.trem, &d.dop, &d.split, &used) != 8)
+            return;
+        d.on = on != 0;
+        s += used;
+        while (*s == ',' && d.count < twirl::DroneSpec::kMaxNotes)
+        {
+            char* end = nullptr;
+            const float hz = std::strtof(s + 1, &end);
+            if (end == s + 1 || ! std::isfinite(hz) || hz <= 0.0f)
+                break;
+            d.freq[d.count++] = hz;
+            s = end;
+        }
+        fDroneSeq.fetch_add(1, std::memory_order_acq_rel);
+        fDroneShared = d;
+        fDroneSeq.fetch_add(1, std::memory_order_acq_rel);
+    }
 
     // "t,voice,pack,midi,vel,pan,y,nuance;…"; anything malformed is skipped.
     void parseVoices(const char* s) noexcept

@@ -119,14 +119,19 @@ ramps, its panner, the feedback delay, a compressor; a pool of 160 voices,
 no allocation while playing. In the plugin's Out picker: "sound made in the
 plugin (new)", alone or with MIDI.
 
-So far Paper's five voices (every pack plays them), the delay and the
-volume; the other packs, the Drone and Warmth come next, then the page's
-stream (below) leaves the plugin. The bar (Alex): "Doesn't even need to sound
+So far Paper's five voices (every pack plays them), the delay, the volume,
+the Drone (its notes from the page as Walk moves them, its space, its level)
+and Warmth's room (hiss, crackle, wow and flutter). The other packs come
+next, then the page's stream (below) leaves the plugin. The bar (Alex): "Doesn't even need to sound
 that close to the current one, as long as it sounds ok."
 
 `make test` renders every voice at 8 pitches and 4 loudnesses, offline, and
-fails if one is silent, clips, isn't finite or doesn't die away; it writes
-`build/render/<voice>.wav` for listening.
+fails if one is silent, clips, isn't finite or doesn't die away; the Drone
+(swells, glides to a new chord, fades out when off) and Warmth (about -60 dB,
+silent at 0) too. It writes `build/render/*.wav` for listening.
+
+Following the host with this sound (no lag to allow for), against Carla's
+transport: on the beat within about 1 ms on average.
 
 ## How Twirl's sound gets to the host (the page's stream, for now)
 
