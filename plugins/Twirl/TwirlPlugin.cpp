@@ -1,5 +1,6 @@
 /*
- * Twirl as a plugin, the DSP side: a MIDI generator with no audio.
+ * Twirl as a plugin, the DSP side: Twirl's own sound on a stereo output, and
+ * its notes as MIDI.
  *
  * Twirl keeps its own clock in the page. Its notes cross in batches, ahead of
  * time, through setState("notes", …): "t,status,note,velocity;…" with t the
@@ -14,6 +15,16 @@
  * counts what's sounding, so "panic" can end it (Start over, the page going).
  * MIDI arriving at the plugin (the host's, and the page's sendNote()) is
  * passed through at once.
+ *
+ * The sound: the page renders it with Web Audio, exactly as in a browser, and
+ * an AudioWorklet at the end of its graph sends it here in small chunks,
+ * setState("audio", "rate,base64"), 16-bit stereo interleaved. Chunks arrive
+ * unevenly (the page's main thread, the host's UI idle), so they wait in a
+ * jitter buffer (100 ms to start, more after an underrun) and are read back
+ * with linear interpolation at a ratio nudged to keep the buffer at its
+ * target: that absorbs the drift between the page's audio clock and the
+ * host's, and a page running at another sample rate. The sound therefore
+ * lags the MIDI by about the buffer's length.
  */
 
 #include "DistrhoPlugin.hpp"
@@ -64,6 +75,61 @@ private:
     std::atomic<uint32_t> fRead { 0 }, fWrite { 0 };
 };
 
+/** Stereo frames, single producer (setState), single consumer (run). */
+class AudioRing {
+public:
+    static constexpr uint32_t kSize = 1 << 16; // frames: 1.4 s at 48 kHz
+
+    uint32_t available() const noexcept
+    {
+        return (fWrite.load(std::memory_order_acquire) - fRead.load(std::memory_order_relaxed)) & (kSize - 1);
+    }
+
+    // Frames that don't fit are dropped (the reader is far behind: it skips ahead anyway).
+    void push(const float* const l, const float* const r, const uint32_t n) noexcept
+    {
+        uint32_t w = fWrite.load(std::memory_order_relaxed);
+        const uint32_t room = kSize - 1 - ((w - fRead.load(std::memory_order_acquire)) & (kSize - 1));
+        for (uint32_t i = 0; i < n && i < room; ++i, w = (w + 1) & (kSize - 1))
+        {
+            fL[w] = l[i];
+            fR[w] = r[i];
+        }
+        fWrite.store(w, std::memory_order_release);
+    }
+
+    bool pop(float& l, float& r) noexcept
+    {
+        const uint32_t rd = fRead.load(std::memory_order_relaxed);
+        if (rd == fWrite.load(std::memory_order_acquire))
+            return false;
+        l = fL[rd];
+        r = fR[rd];
+        fRead.store((rd + 1) & (kSize - 1), std::memory_order_release);
+        return true;
+    }
+
+    void skip(const uint32_t n) noexcept
+    {
+        const uint32_t rd = fRead.load(std::memory_order_relaxed);
+        fRead.store((rd + std::min(n, available())) & (kSize - 1), std::memory_order_release);
+    }
+
+private:
+    float fL[kSize], fR[kSize];
+    std::atomic<uint32_t> fRead { 0 }, fWrite { 0 };
+};
+
+static int b64(const char c) noexcept
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
 static double wallMs() noexcept
 {
     timespec ts;
@@ -103,7 +169,13 @@ protected:
 
     void setState(const char* const key, const char* const value) override
     {
-        if (std::strcmp(key, "notes") == 0)
+        if (std::strcmp(key, "audio") == 0)
+        {
+            parseAudio(value);
+            if (fDebug)
+                report();
+        }
+        else if (std::strcmp(key, "notes") == 0)
             parseNotes(value);
         else if (std::strcmp(key, "panic") == 0)
             fPanic.store(true, std::memory_order_release);
@@ -117,11 +189,20 @@ protected:
         fFrames = 0;
         fHaveOffset = false;
         fPendingCount = 0;
+        fPriming = true;
+        fTargetMs = fTargetBefore = kTargetStartMs;
+        fGapFrames = 0.0;
+        fGain = 0.0f;
+        fFade = 1;
+        fPhase = 1.0;
+        fPrevL = fPrevR = fNextL = fNextR = 0.0f;
     }
 
-    void run(const float**, float**, const uint32_t frames,
+    void run(const float**, float** const outputs, const uint32_t frames,
              const MidiEvent* const midiIn, const uint32_t midiInCount) override
     {
+        renderAudio(outputs[0], outputs[1], frames);
+
         // Where this block sits on the wall clock. Measured each block, but
         // smoothed against the sample count so that one late callback doesn't
         // move every note in it (re-anchored after a jump: an xrun, a stall).
@@ -209,6 +290,37 @@ private:
     static constexpr uint32_t kMaxPending = 2048;
     static constexpr uint32_t kMaxOut = 512;
     static constexpr double kStaleMs = 1000.0; // older than this is from a stall or a restore: dropped
+    static constexpr double kTargetStartMs = 100.0, kTargetMaxMs = 400.0;
+
+    AudioRing fAudio;
+    std::atomic<uint32_t> fPageRate { 0 };
+    bool fPriming = true;          // waiting for the buffer to fill to its target
+    double fTargetMs = kTargetStartMs, fTargetBefore = kTargetStartMs;
+    double fGapFrames = 0.0;       // after an underrun, how long nothing came
+    double fPhase = 1.0;           // between fPrev and fNext, in source frames
+    float fPrevL = 0.0f, fPrevR = 0.0f, fNextL = 0.0f, fNextR = 0.0f;
+    static constexpr float kFadeStep = 1.0f / 128.0f; // about 3 ms
+    float fGain = 0.0f;            // fades out before a jump, in after one or a wait
+    int fFade = 1;                 // -1 fading out, 1 fading in, 0 steady
+    float fDecodeL[4096], fDecodeR[4096];
+
+    // TWIRL_DEBUG=1 in the environment: a line every 5 s on stdout, from setState's thread.
+    const bool fDebug = std::getenv("TWIRL_DEBUG") != nullptr;
+    std::atomic<uint32_t> fUnderruns { 0 };
+    std::atomic<double> fStep { 1.0 }, fTargetNow { kTargetStartMs };
+    double fLastReport = 0.0;
+
+    void report() noexcept
+    {
+        const double now = wallMs();
+        if (now - fLastReport < 5000.0)
+            return;
+        fLastReport = now;
+        const uint32_t rate = fPageRate.load(std::memory_order_relaxed);
+        d_stdout("twirl: audio buffered %.1f ms (target %.0f), underruns %u, ratio %.5f, page %u Hz, host %.0f Hz",
+                 rate ? fAudio.available() * 1000.0 / rate : 0.0, fTargetNow.load(std::memory_order_relaxed),
+                 fUnderruns.load(std::memory_order_relaxed), fStep.load(std::memory_order_relaxed), rate, getSampleRate());
+    }
 
     NoteRing<4096> fRing;
     std::atomic<bool> fPanic { false };
@@ -248,6 +360,140 @@ private:
         {
             --fSounding[ch][note];
         }
+    }
+
+    void renderAudio(float* const outL, float* const outR, const uint32_t frames) noexcept
+    {
+        const double sr = getSampleRate();
+        const uint32_t pageRate = fPageRate.load(std::memory_order_acquire);
+        const uint32_t target = static_cast<uint32_t>(fTargetMs * (pageRate ? pageRate : sr) / 1000.0);
+        const uint32_t fill = fAudio.available();
+
+        if (fPriming)
+        {
+            if (fill >= target)
+            {
+                fPriming = false;
+                // Only a short gap (the sound came back within 50 ms) was jitter
+                // a bigger buffer would have covered. A long one was a stall, a
+                // pause or the window closing: the buffer goes back to what it was.
+                if (fGapFrames > sr / 20)
+                    fTargetMs = fTargetBefore;
+                // More came while it waited (a burst): start from the target. It's
+                // silent now, so the jump can't click; the sound fades in.
+                if (fill > target)
+                    fAudio.skip(fill - target);
+                fGain = 0.0f;
+                fFade = 1;
+            }
+            else
+            {
+                if (fill == 0)
+                    fGapFrames += frames;
+            }
+        }
+        // Far too much waiting (a burst after the page stalled): the sound dips
+        // for a few ms (no click) while the reader jumps to the target.
+        if (! fPriming && fFade == 0 && fill > 2 * target)
+            fFade = -1;
+
+        if (fPriming || pageRate == 0)
+        {
+            std::memset(outL, 0, sizeof(float) * frames);
+            std::memset(outR, 0, sizeof(float) * frames);
+            return;
+        }
+
+        // Read faster when the buffer is above its target, slower below: at most
+        // ±0.5 %, a pitch change of under a tenth of a semitone, never heard.
+        const double err = (static_cast<double>(fAudio.available()) - target) / target;
+        const double step = (pageRate / sr) * (1.0 + std::max(-0.005, std::min(0.005, err * 0.005)));
+        fStep.store(step, std::memory_order_relaxed);
+        fTargetNow.store(fTargetMs, std::memory_order_relaxed);
+
+        for (uint32_t i = 0; i < frames; ++i)
+        {
+            while (fPhase >= 1.0)
+            {
+                fPrevL = fNextL;
+                fPrevR = fNextR;
+                if (! fAudio.pop(fNextL, fNextR))
+                {
+                    // Underrun: silence, wait for more, and keep more from now on.
+                    std::memset(outL + i, 0, sizeof(float) * (frames - i));
+                    std::memset(outR + i, 0, sizeof(float) * (frames - i));
+                    fUnderruns.fetch_add(1, std::memory_order_relaxed);
+                    fPriming = true;
+                    fGapFrames = 0;
+                    fTargetBefore = fTargetMs;
+                    fTargetMs = std::min(kTargetMaxMs, fTargetMs * 1.25);
+                    fNextL = fNextR = 0.0f;
+                    return;
+                }
+                fPhase -= 1.0;
+            }
+            if (fFade != 0)
+            {
+                fGain += fFade * kFadeStep;
+                if (fFade < 0 && fGain <= 0.0f)
+                {
+                    const uint32_t now = fAudio.available();
+                    if (now > target)
+                        fAudio.skip(now - target);
+                    fGain = 0.0f;
+                    fFade = 1;
+                }
+                else if (fFade > 0 && fGain >= 1.0f)
+                {
+                    fGain = 1.0f;
+                    fFade = 0;
+                }
+            }
+            const float f = static_cast<float>(fPhase);
+            outL[i] = (fPrevL + (fNextL - fPrevL) * f) * fGain;
+            outR[i] = (fPrevR + (fNextR - fPrevR) * f) * fGain;
+            fPhase += step;
+        }
+    }
+
+    // "rate,base64": 16-bit little-endian stereo frames, interleaved.
+    void parseAudio(const char* s) noexcept
+    {
+        char* end = nullptr;
+        const long rate = std::strtol(s, &end, 10);
+        if (end == s || *end != ',' || rate < 8000 || rate > 384000)
+            return;
+        fPageRate.store(static_cast<uint32_t>(rate), std::memory_order_release);
+        s = end + 1;
+
+        uint32_t n = 0;
+        uint8_t bytes[4];
+        int nbytes = 0;
+        uint32_t acc = 0;
+        int bits = 0;
+        for (; *s != '\0' && *s != '='; ++s)
+        {
+            const int v = b64(*s);
+            if (v < 0)
+                return;
+            acc = (acc << 6) | static_cast<uint32_t>(v);
+            bits += 6;
+            if (bits < 8)
+                continue;
+            bits -= 8;
+            bytes[nbytes++] = static_cast<uint8_t>(acc >> bits);
+            if (nbytes < 4)
+                continue;
+            nbytes = 0;
+            fDecodeL[n] = static_cast<int16_t>(bytes[0] | (bytes[1] << 8)) / 32768.0f;
+            fDecodeR[n] = static_cast<int16_t>(bytes[2] | (bytes[3] << 8)) / 32768.0f;
+            if (++n == 4096)
+            {
+                fAudio.push(fDecodeL, fDecodeR, n);
+                n = 0;
+            }
+        }
+        fAudio.push(fDecodeL, fDecodeR, n);
     }
 
     // "t,status,note,velocity;…"; anything malformed is skipped.

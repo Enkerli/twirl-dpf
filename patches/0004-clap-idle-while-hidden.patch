@@ -1,0 +1,38 @@
+--- a/distrho/src/DistrhoPluginCLAP.cpp	2026-10-25 22:38:47.120349372 -0400
++++ b/distrho/src/DistrhoPluginCLAP.cpp	2026-10-25 22:38:47.244420374 -0400
+@@ -461,10 +461,14 @@
+             fUI->setWindowVisible(true);
+ 
+        #if DPF_CLAP_USING_HOST_TIMER
+-        fHostTimer->register_timer(fHost, DPF_CLAP_TIMER_INTERVAL, &fTimerId);
++        if (fTimerId == 0)
++            fHostTimer->register_timer(fHost, DPF_CLAP_TIMER_INTERVAL, &fTimerId);
+        #else
+-        fCallbackRegistered = true;
+-        fUI->addIdleCallbackForNativeIdle(this, DPF_CLAP_TIMER_INTERVAL);
++        if (! fCallbackRegistered)
++        {
++            fCallbackRegistered = true;
++            fUI->addIdleCallbackForNativeIdle(this, DPF_CLAP_TIMER_INTERVAL);
++        }
+        #endif
+         return true;
+     }
+@@ -474,13 +478,10 @@
+         if (UIExporter* const ui = fUI.get())
+         {
+             ui->setWindowVisible(false);
+-           #if DPF_CLAP_USING_HOST_TIMER
+-            fHostTimer->unregister_timer(fHost, fTimerId);
+-            fTimerId = 0;
+-           #else
+-            ui->removeIdleCallbackForNativeIdle(this);
+-            fCallbackRegistered = false;
+-           #endif
++            // The idle keeps running while hidden: a web view's page goes on
++            // (a clock, a sequencer) and its messages are only collected here.
++            // Hosts hide plugin windows freely (Bitwig, when another device's
++            // window opens); the timer stops when the UI is destroyed.
+         }
+ 
+         return true;
