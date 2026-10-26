@@ -1,6 +1,6 @@
---- a/distrho/extra/WebViewImpl.cpp	2026-10-25 22:38:47.108271920 -0400
-+++ b/distrho/extra/WebViewImpl.cpp	2026-10-25 22:38:47.222419968 -0400
-@@ -317,6 +317,33 @@
+--- a/distrho/extra/WebViewImpl.cpp
++++ b/distrho/extra/WebViewImpl.cpp
+@@ -317,6 +317,41 @@
      char* initialJS;
  };
  
@@ -11,11 +11,19 @@
 +// web view takes the focus: allowed, being inside the host's focused window.
 +static ::Display* s_focusDisplay = nullptr;
 +static ::Window s_focusParent = 0;
++static ::Window s_focusWindow = 0; // the web view's own window, where known (Qt): it may be moved to another parent
 +
 +static bool webview_focus_message(const char* const msg)
 +{
 +    if (std::strcmp(msg, "__dpf_focus") != 0)
 +        return false;
++
++    if (s_focusDisplay != nullptr && s_focusWindow != 0)
++    {
++        XSetInputFocus(s_focusDisplay, s_focusWindow, RevertToParent, CurrentTime);
++        XFlush(s_focusDisplay);
++        return true;
++    }
 +
 +    ::Window root = 0, parent = 0, *children = nullptr;
 +    uint count = 0;
@@ -34,7 +42,7 @@
  static void webview_wake(ipc_sem_t* const sem)
  {
     #ifdef __linux__
-@@ -1276,6 +1303,12 @@
+@@ -1276,6 +1311,12 @@
      char* const string = jsc_value_to_string(value);
      DISTRHO_SAFE_ASSERT_RETURN(string != nullptr, false);
  
@@ -47,7 +55,7 @@
      d_debug("js call received with data '%s'", string);
  
      const size_t len = std::strlen(string) + 1;
-@@ -2041,13 +2074,16 @@
+@@ -2041,13 +2082,16 @@
  
          d_debug("js call received with data '%s'", value);
  
@@ -71,7 +79,15 @@
  
         #ifndef WEB_VIEW_INCLUDE_QTx_EXPLICITLY
          // QByteArray and QString destructors are inlined and can't be called from here, call their next closest thing
-@@ -2692,6 +2728,8 @@
+@@ -2456,6 +2500,7 @@
+ 
+     const uintptr_t webviewWinId = QWebEngineView_winId(&webview);
+     eventFilter.setWinId(webviewWinId);
++    s_focusWindow = static_cast<::Window>(webviewWinId);
+ 
+     // FIXME Qt6 seems to need some forcing..
+     if (qtVersion >= 6)
+@@ -2692,6 +2737,8 @@
  
              hasInitialData = running = true;
              options.winId = rbctrl.readULong();
@@ -80,8 +96,8 @@
              options.width = rbctrl.readUInt();
              options.height = rbctrl.readUInt();
              options.scaleFactor = rbctrl.readDouble();
---- a/distrho/src/DistrhoUI.cpp	2026-10-25 22:38:47.113588837 -0400
-+++ b/distrho/src/DistrhoUI.cpp	2026-10-25 22:38:47.236420226 -0400
+--- a/distrho/src/DistrhoUI.cpp
++++ b/distrho/src/DistrhoUI.cpp
 @@ -210,6 +210,7 @@
  
          WebViewOptions opts;

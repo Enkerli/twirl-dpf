@@ -13,7 +13,7 @@ include ../../dpf/Makefile.plugins.mk
 BUILD_CXX_FLAGS += -Wno-unused-parameter
 
 TARGETS += jack
-TARGETS += lv2_sep
+TARGETS += lv2
 TARGETS += vst3
 TARGETS += clap
 

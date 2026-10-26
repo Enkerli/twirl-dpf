@@ -24,16 +24,35 @@
  * with linear interpolation at a ratio nudged to keep the buffer at its
  * target: that absorbs the drift between the page's audio clock and the
  * host's, and a page running at another sample rate. The sound therefore
- * lags the MIDI by about the buffer's length.
+ * lags the MIDI by about the buffer's length; each chunk carries the wall
+ * time it was rendered for, so the plugin measures that lag and reports it.
+ *
+ * The page belongs to the plugin, not to its window (TwirlPage.hpp): it runs
+ * from activate() to the end, window open or not, and its messages come here
+ * directly. Twirl's state (its sheet, its Out choice, Follow host transport)
+ * is the page's: it sends it as "page" (base64 JSON) and the plugin saves it
+ * with the host's project and gives it back on loading.
+ *
+ * Following the host is the page's doing: run() records the host's tempo,
+ * whether it's rolling and its beat at that moment's wall-clock time, and the
+ * plugin hands that to the page 20 times a second (window.twirlHost), with
+ * the audio lag; the page lines its beats up with the host's.
  */
 
 #include "DistrhoPlugin.hpp"
+#include "DistrhoPluginUtils.hpp"
+#include "TwirlPage.hpp"
+#include "TwirlShared.hpp"
 
 #include <atomic>
+#include <cctype>
+#include <cstdio>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <mutex>
+#include <string>
 
 START_NAMESPACE_DISTRHO
 
@@ -86,16 +105,18 @@ public:
     }
 
     // Frames that don't fit are dropped (the reader is far behind: it skips ahead anyway).
-    void push(const float* const l, const float* const r, const uint32_t n) noexcept
+    uint32_t push(const float* const l, const float* const r, const uint32_t n) noexcept
     {
         uint32_t w = fWrite.load(std::memory_order_relaxed);
         const uint32_t room = kSize - 1 - ((w - fRead.load(std::memory_order_acquire)) & (kSize - 1));
-        for (uint32_t i = 0; i < n && i < room; ++i, w = (w + 1) & (kSize - 1))
+        const uint32_t count = std::min(n, room);
+        for (uint32_t i = 0; i < count; ++i, w = (w + 1) & (kSize - 1))
         {
             fL[w] = l[i];
             fR[w] = r[i];
         }
         fWrite.store(w, std::memory_order_release);
+        return count;
     }
 
     bool pop(float& l, float& r) noexcept
@@ -109,14 +130,52 @@ public:
         return true;
     }
 
-    void skip(const uint32_t n) noexcept
+    uint32_t skip(uint32_t n) noexcept
     {
+        n = std::min(n, available());
         const uint32_t rd = fRead.load(std::memory_order_relaxed);
-        fRead.store((rd + std::min(n, available())) & (kSize - 1), std::memory_order_release);
+        fRead.store((rd + n) & (kSize - 1), std::memory_order_release);
+        return n;
     }
 
 private:
     float fL[kSize], fR[kSize];
+    std::atomic<uint32_t> fRead { 0 }, fWrite { 0 };
+};
+
+/** When each audio chunk starts (in frames pushed so far) and the wall time it was rendered for. */
+struct ChunkStamp {
+    uint64_t frame;
+    double   wall;
+};
+
+/** Single producer (setState), single consumer (run), like NoteRing. */
+class StampRing {
+public:
+    static constexpr uint32_t kSize = 256;
+
+    void push(const ChunkStamp& c) noexcept
+    {
+        const uint32_t w = fWrite.load(std::memory_order_relaxed), next = (w + 1) % kSize;
+        if (next == fRead.load(std::memory_order_acquire))
+            return; // full: this chunk goes unmeasured
+        fBuf[w] = c;
+        fWrite.store(next, std::memory_order_release);
+    }
+
+    const ChunkStamp* front() const noexcept
+    {
+        const uint32_t r = fRead.load(std::memory_order_relaxed);
+        return r == fWrite.load(std::memory_order_acquire) ? nullptr : &fBuf[r];
+    }
+
+    void pop() noexcept
+    {
+        fRead.store((fRead.load(std::memory_order_relaxed) + 1) % kSize, std::memory_order_release);
+    }
+
+private:
+    ChunkStamp fBuf[kSize];
     std::atomic<uint32_t> fRead { 0 }, fWrite { 0 };
 };
 
@@ -139,13 +198,20 @@ static double wallMs() noexcept
 
 // -----------------------------------------------------------------------------------------------------------
 
-class TwirlPlugin : public Plugin
+class TwirlPlugin : public Plugin, public TwirlPage::Listener, public TwirlPageAccess
 {
 public:
     TwirlPlugin()
-        : Plugin(0, 0, 0) // no parameters, no programs, no saved states (yet: the sheet comes later)
+        : Plugin(0, 0, 1), // no parameters, no programs, one state: the page's
+          fPage(*this)
     {
         std::memset(fSounding, 0, sizeof(fSounding));
+    }
+
+    ~TwirlPlugin() override
+    {
+        // Before the members it calls into go: the page's thread stops here.
+        fPageStopping = true;
     }
 
 protected:
@@ -163,12 +229,60 @@ protected:
     uint32_t getVersion() const override { return d_version(0, 1, 0); }
 
    /* --------------------------------------------------------------------------------------------------------
-    * State: the page's messages (none saved with the project) */
+    * State: the page's, saved with the project */
 
-    void initState(uint32_t, State&) override {}
+    void initState(const uint32_t index, State& state) override
+    {
+        if (index != 0)
+            return;
+        state.key = "page";
+        state.defaultValue = "";
+        state.hints = kStateIsHostReadable | kStateIsOnlyForDSP;
+    }
 
+    String getState(const char* const key) const override
+    {
+        if (std::strcmp(key, "page") != 0)
+            return String();
+        const std::lock_guard<std::mutex> lock(fSavedMutex);
+        return String(fSaved.c_str());
+    }
+
+    // From the host: a project loading.
     void setState(const char* const key, const char* const value) override
     {
+        if (std::strcmp(key, "page") != 0)
+            return;
+        {
+            const std::lock_guard<std::mutex> lock(fSavedMutex);
+            fSaved = value;
+        }
+        if (fPageSaidReady)
+            restorePage();
+    }
+
+   /* --------------------------------------------------------------------------------------------------------
+    * The page: its messages, on its thread */
+
+    void pageMessage(char* const msg) override
+    {
+        if (fPageStopping)
+            return;
+        if (std::strncmp(msg, "sendnote ", 9) == 0)
+        {
+            long c = 0, n = 0, v = 0;
+            if (std::sscanf(msg + 9, "%ld %ld %ld", &c, &n, &v) == 3 && c >= 0 && c < 16 && n >= 0 && n < 128 && v >= 0 && v < 128)
+                fRing.push({ wallMs(), { static_cast<uint8_t>((v ? 0x90 : 0x80) | c), static_cast<uint8_t>(n), static_cast<uint8_t>(v) } });
+            return;
+        }
+        if (std::strncmp(msg, "setstate ", 9) != 0)
+            return;
+        char* const key = msg + 9;
+        char* const sep = std::strchr(key, ' ');
+        const char* const value = sep != nullptr ? sep + 1 : "";
+        if (sep != nullptr)
+            *sep = '\0';
+
         if (std::strcmp(key, "audio") == 0)
         {
             parseAudio(value);
@@ -179,6 +293,54 @@ protected:
             parseNotes(value);
         else if (std::strcmp(key, "panic") == 0)
             fPanic.store(true, std::memory_order_release);
+        else if (std::strcmp(key, "page") == 0)
+        {
+            const std::lock_guard<std::mutex> lock(fSavedMutex);
+            fSaved = value;
+        }
+        else if (std::strcmp(key, "ready") == 0)
+        {
+            // The page has (re)loaded: it gets its saved state, if there is one.
+            fPageSaidReady = true;
+            restorePage();
+        }
+    }
+
+    // Every 10 ms: the host's time for the page, 20 times a second.
+    void pageIdle() override
+    {
+        if (fPageStopping || ! fPageSaidReady || ++fIdleCount % 5 != 0)
+            return;
+        HostTime h;
+        if (! readHostTime(h))
+            return;
+        char js[256];
+        {
+            const ScopedSafeLocale ssl;
+            std::snprintf(js, sizeof(js),
+                          "window.twirlHost && twirlHost({tempo:%.4f,playing:%s,beat:%.6f,at:%.3f,lag:%.2f})",
+                          h.tempo, h.playing ? "true" : "false", h.beat, h.at,
+                          fHaveLag ? std::max(0.0, std::min(1000.0, fAudioLagMs.load())) : 0.0);
+        }
+        fPage.evaluate(js);
+    }
+
+   /* --------------------------------------------------------------------------------------------------------
+    * The UI (direct access): show the page in its window */
+
+    void uiAttach(const uintptr_t window, const unsigned width, const unsigned height) override
+    {
+        fPage.attach(window, width, height);
+    }
+
+    void uiDetach() override
+    {
+        fPage.detach();
+    }
+
+    void uiResize(const unsigned width, const unsigned height) override
+    {
+        fPage.resize(width, height);
     }
 
    /* --------------------------------------------------------------------------------------------------------
@@ -186,6 +348,7 @@ protected:
 
     void activate() override
     {
+        startPage();
         fFrames = 0;
         fHaveOffset = false;
         fPendingCount = 0;
@@ -196,13 +359,12 @@ protected:
         fFade = 1;
         fPhase = 1.0;
         fPrevL = fPrevR = fNextL = fNextR = 0.0f;
+        fHaveLag = false;
     }
 
     void run(const float**, float** const outputs, const uint32_t frames,
              const MidiEvent* const midiIn, const uint32_t midiInCount) override
     {
-        renderAudio(outputs[0], outputs[1], frames);
-
         // Where this block sits on the wall clock. Measured each block, but
         // smoothed against the sample count so that one late callback doesn't
         // move every note in it (re-anchored after a jump: an xrun, a stall).
@@ -221,6 +383,20 @@ protected:
         const double blockStart = fOffset + fFrames * frameMs;
         const double blockEnd = blockStart + frames * frameMs;
         fFrames += frames;
+
+        renderAudio(outputs[0], outputs[1], frames, blockStart, frameMs);
+
+        // The host's time, for the page: its beat at this block's wall-clock time.
+        const TimePosition& pos(getTimePosition());
+        HostTime h;
+        h.playing = pos.playing;
+        h.at = blockStart;
+        if (pos.bbt.valid && pos.bbt.beatsPerMinute > 0.0 && pos.bbt.ticksPerBeat > 0.0)
+        {
+            h.tempo = pos.bbt.beatsPerMinute;
+            h.beat = (pos.bbt.barStartTick + pos.bbt.tick) / pos.bbt.ticksPerBeat + (pos.bbt.beat - 1);
+        }
+        writeHostTime(h);
 
         // New events from the page join the pending list.
         TimedNote n;
@@ -303,6 +479,87 @@ private:
     float fGain = 0.0f;            // fades out before a jump, in after one or a wait
     int fFade = 1;                 // -1 fading out, 1 fading in, 0 steady
     float fDecodeL[4096], fDecodeR[4096];
+    StampRing fStamps;
+    uint64_t fPushed = 0;          // frames into the ring so far (setState's thread)
+    uint64_t fPopped = 0;          // frames out of it so far, read or skipped (run's)
+    std::atomic<double> fAudioLagMs { 0.0 }; // read by the page's thread
+    std::atomic<bool> fHaveLag { false };
+
+    // The host's time, written by run(), read by the page's thread (a seqlock).
+    struct HostTime {
+        double tempo = 0.0;        // 0: the host gives none
+        double beat = 0.0;         // its beat (quarter notes, say) at wall time `at`
+        double at = 0.0;
+        bool playing = false;
+    };
+    std::atomic<uint32_t> fHostSeq { 0 };
+    std::atomic<double> fHostTempo { 0.0 }, fHostBeat { 0.0 }, fHostAt { 0.0 };
+    std::atomic<bool> fHostPlaying { false };
+
+    void writeHostTime(const HostTime& h) noexcept
+    {
+        fHostSeq.fetch_add(1, std::memory_order_acq_rel); // odd: writing
+        fHostTempo.store(h.tempo, std::memory_order_relaxed);
+        fHostBeat.store(h.beat, std::memory_order_relaxed);
+        fHostAt.store(h.at, std::memory_order_relaxed);
+        fHostPlaying.store(h.playing, std::memory_order_relaxed);
+        fHostSeq.fetch_add(1, std::memory_order_acq_rel); // even: done
+    }
+
+    bool readHostTime(HostTime& h) const noexcept
+    {
+        for (int tries = 0; tries < 4; ++tries)
+        {
+            const uint32_t seq = fHostSeq.load(std::memory_order_acquire);
+            if (seq == 0 || (seq & 1) != 0)
+                continue;
+            h.tempo = fHostTempo.load(std::memory_order_relaxed);
+            h.beat = fHostBeat.load(std::memory_order_relaxed);
+            h.at = fHostAt.load(std::memory_order_relaxed);
+            h.playing = fHostPlaying.load(std::memory_order_relaxed);
+            if (fHostSeq.load(std::memory_order_acquire) == seq)
+                return true;
+        }
+        return false;
+    }
+
+    // The page and its saved state.
+    TwirlPage fPage;
+    std::atomic<bool> fPageStopping { false }, fPageSaidReady { false };
+    uint32_t fIdleCount = 0;
+    mutable std::mutex fSavedMutex;
+    std::string fSaved;             // base64 JSON, the page's to read
+
+    void startPage()
+    {
+        String path;
+        if (const char* const bundle = getBundlePath())
+        {
+            path = getResourcePath(bundle);
+        }
+        else
+        {
+            path = getBinaryFilename();
+            path.truncate(path.rfind(DISTRHO_OS_SEP));
+            path += "/resources";
+        }
+        path.urlEncode();
+        fPage.start("file://" + path + "/index.html");
+    }
+
+    void restorePage()
+    {
+        std::string saved;
+        {
+            const std::lock_guard<std::mutex> lock(fSavedMutex);
+            saved = fSaved;
+        }
+        // base64: no quotes or backslashes to escape
+        for (const char c : saved)
+            if (! (std::isalnum(static_cast<unsigned char>(c)) || c == '+' || c == '/' || c == '='))
+                return;
+        fPage.evaluate("window.twirlRestore && twirlRestore('" + saved + "')");
+    }
 
     // TWIRL_DEBUG=1 in the environment: a line every 5 s on stdout, from setState's thread.
     const bool fDebug = std::getenv("TWIRL_DEBUG") != nullptr;
@@ -362,7 +619,8 @@ private:
         }
     }
 
-    void renderAudio(float* const outL, float* const outR, const uint32_t frames) noexcept
+    void renderAudio(float* const outL, float* const outR, const uint32_t frames,
+                     const double blockStart, const double frameMs) noexcept
     {
         const double sr = getSampleRate();
         const uint32_t pageRate = fPageRate.load(std::memory_order_acquire);
@@ -382,7 +640,7 @@ private:
                 // More came while it waited (a burst): start from the target. It's
                 // silent now, so the jump can't click; the sound fades in.
                 if (fill > target)
-                    fAudio.skip(fill - target);
+                    fPopped += fAudio.skip(fill - target);
                 fGain = 0.0f;
                 fFade = 1;
             }
@@ -431,6 +689,7 @@ private:
                     return;
                 }
                 fPhase -= 1.0;
+                measureLag(fPopped++, blockStart + i * frameMs);
             }
             if (fFade != 0)
             {
@@ -439,7 +698,7 @@ private:
                 {
                     const uint32_t now = fAudio.available();
                     if (now > target)
-                        fAudio.skip(now - target);
+                        fPopped += fAudio.skip(now - target);
                     fGain = 0.0f;
                     fFade = 1;
                 }
@@ -456,14 +715,38 @@ private:
         }
     }
 
-    // "rate,base64": 16-bit little-endian stereo frames, interleaved.
+    // The audio frame `frame` (counted from the start) is leaving the plugin at
+    // wall time `wall`: if a chunk started there, the lag is how late that is.
+    void measureLag(const uint64_t frame, const double wall) noexcept
+    {
+        while (const ChunkStamp* const c = fStamps.front())
+        {
+            if (c->frame > frame)
+                return;
+            if (c->frame == frame)
+            {
+                const double lag = wall - c->wall, was = fAudioLagMs.load(std::memory_order_relaxed);
+                fAudioLagMs.store(fHaveLag.load(std::memory_order_relaxed) ? was + (lag - was) * 0.05 : lag, std::memory_order_relaxed);
+                fHaveLag.store(true, std::memory_order_relaxed);
+            }
+            fStamps.pop(); // used, or skipped over
+        }
+    }
+
+    // "rate,wall,base64": 16-bit little-endian stereo frames, interleaved; `wall`
+    // the ms since the epoch the first frame was rendered for.
     void parseAudio(const char* s) noexcept
     {
         char* end = nullptr;
         const long rate = std::strtol(s, &end, 10);
         if (end == s || *end != ',' || rate < 8000 || rate > 384000)
             return;
+        s = end + 1;
+        const double wall = std::strtod(s, &end);
+        if (end == s || *end != ',')
+            return;
         fPageRate.store(static_cast<uint32_t>(rate), std::memory_order_release);
+        fStamps.push({ fPushed, wall });
         s = end + 1;
 
         uint32_t n = 0;
@@ -489,11 +772,11 @@ private:
             fDecodeR[n] = static_cast<int16_t>(bytes[2] | (bytes[3] << 8)) / 32768.0f;
             if (++n == 4096)
             {
-                fAudio.push(fDecodeL, fDecodeR, n);
+                fPushed += fAudio.push(fDecodeL, fDecodeR, n);
                 n = 0;
             }
         }
-        fAudio.push(fDecodeL, fDecodeR, n);
+        fPushed += fAudio.push(fDecodeL, fDecodeR, n);
     }
 
     // "t,status,note,velocity;…"; anything malformed is skipped.

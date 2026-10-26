@@ -23,13 +23,19 @@
 // (the page's notes arrive as input events); host MIDI in is passed through.
 #define DISTRHO_PLUGIN_WANT_MIDI_INPUT  1
 #define DISTRHO_PLUGIN_WANT_MIDI_OUTPUT 1
-// State: the page's timed note batches and its audio arrive through setState.
-// LV2 carries them in atom events: room for many audio chunks (about 3 KB
-// each) and notes per cycle.
+// State: the page's (its sheet, its Out choice, Follow host transport), saved
+// with the project. The page's notes and sound come to the plugin directly.
 #define DISTRHO_PLUGIN_WANT_STATE       1
-#define DISTRHO_PLUGIN_MINIMUM_BUFFER_SIZE 65536
+#define DISTRHO_PLUGIN_WANT_FULL_STATE  1
+// The host's tempo and position, for "Follow host transport".
+#define DISTRHO_PLUGIN_WANT_TIMEPOS     1
+// The page belongs to the plugin (TwirlPage.hpp); the UI shows it in its
+// window, through direct access. DPF's web view functions, without its web
+// view UI.
+#define DISTRHO_PLUGIN_WANT_DIRECT_ACCESS 1
+#define DISTRHO_UI_WEB_VIEW             1
+#define DISTRHO_UI_USE_WEB_VIEW         0
 #define DISTRHO_UI_USER_RESIZABLE       1
-#define DISTRHO_UI_USE_WEB_VIEW         1
 
 #define DISTRHO_PLUGIN_LV2_CATEGORY    "lv2:InstrumentPlugin"
 #define DISTRHO_PLUGIN_VST3_CATEGORIES "Instrument|Generator|Stereo"
