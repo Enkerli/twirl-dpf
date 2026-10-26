@@ -108,7 +108,27 @@ As in Twirl's Web MIDI output: **pluck 1, bell 2, blip 3, drums and shaker
 10** (General MIDI: kick 36, snare 38, hat 42, shaker 70). Note lengths:
 drums 80 ms, pluck and blip 220, bell 600.
 
-## How Twirl's sound gets to the host
+## Twirl's sound made in the plugin (route C, in progress)
+
+`TwirlEngine.hpp`: the page sends each note as it would have played it
+(voice, sound pack, exact pitch, velocity, pan, height, Vary's nuance), timed
+like the MIDI (`setState("voices", …)`); the engine plays it at its sample
+offset: no lag, in step with the MIDI and the host. Built from what Twirl's
+Web Audio recipes use: band-limited oscillators, Web Audio's biquads and
+ramps, its panner, the feedback delay, a compressor; a pool of 160 voices,
+no allocation while playing. In the plugin's Out picker: "sound made in the
+plugin (new)", alone or with MIDI.
+
+So far Paper's five voices (every pack plays them), the delay and the
+volume; the other packs, the Drone and Warmth come next, then the page's
+stream (below) leaves the plugin. The bar (Alex): "Doesn't even need to sound
+that close to the current one, as long as it sounds ok."
+
+`make test` renders every voice at 8 pitches and 4 loudnesses, offline, and
+fails if one is silent, clips, isn't finite or doesn't die away; it writes
+`build/render/<voice>.wav` for listening.
+
+## How Twirl's sound gets to the host (the page's stream, for now)
 
 The page renders it with Web Audio, as in a browser; an AudioWorklet at the
 end of its graph sends it on in 512-frame chunks (16-bit stereo, base64,

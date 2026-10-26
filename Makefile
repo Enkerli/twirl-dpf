@@ -56,4 +56,11 @@ clean:
 	$(MAKE) clean -C plugins/Twirl
 	rm -rf bin build
 
-.PHONY: all patch dgl page plugins gen install clean
+# Twirl's engine, offline (tests/render_test.cpp): each voice sounds, doesn't
+# clip, dies away; WAVs in build/render/ for listening.
+test:
+	@mkdir -p build/render
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -o build/render_test tests/render_test.cpp
+	./build/render_test
+
+.PHONY: all patch dgl page plugins gen install clean test

@@ -27,6 +27,12 @@
  * lags the MIDI by about the buffer's length; each chunk carries the wall
  * time it was rendered for, so the plugin measures that lag and reports it.
  *
+ * Route C (TwirlEngine.hpp): Twirl's sound made here. The page sends each
+ * note it would have played, timed like the MIDI: setState("voices",
+ * "t,voice,pack,midi,vel,pan,y,nuance;…"), and the volume and tempo as
+ * setState("engine", "volume,bpm"); the engine plays them at their sample
+ * offsets, mixed with whatever the page still streams.
+ *
  * The page belongs to the plugin, not to its window (TwirlPage.hpp): it runs
  * from activate() to the end, window open or not, and its messages come here
  * directly. Twirl's state (its sheet, its Out choice, Follow host transport)
@@ -41,6 +47,7 @@
 
 #include "DistrhoPlugin.hpp"
 #include "DistrhoPluginUtils.hpp"
+#include "TwirlEngine.hpp"
 #include "TwirlPage.hpp"
 #include "TwirlShared.hpp"
 
@@ -91,6 +98,39 @@ public:
 
 private:
     TimedNote fBuf[N];
+    std::atomic<uint32_t> fRead { 0 }, fWrite { 0 };
+};
+
+/** A note for the engine, timed like TimedNote. */
+struct TimedVoice {
+    double t;
+    twirl::NoteSpec spec;
+};
+
+/** Single producer (the page's thread), single consumer (run). */
+template <uint32_t N>
+class VoiceRing {
+public:
+    bool push(const TimedVoice& v) noexcept
+    {
+        const uint32_t w = fWrite.load(std::memory_order_relaxed), next = (w + 1) % N;
+        if (next == fRead.load(std::memory_order_acquire))
+            return false;
+        fBuf[w] = v;
+        fWrite.store(next, std::memory_order_release);
+        return true;
+    }
+    bool pop(TimedVoice& v) noexcept
+    {
+        const uint32_t r = fRead.load(std::memory_order_relaxed);
+        if (r == fWrite.load(std::memory_order_acquire))
+            return false;
+        v = fBuf[r];
+        fRead.store((r + 1) % N, std::memory_order_release);
+        return true;
+    }
+private:
+    TimedVoice fBuf[N];
     std::atomic<uint32_t> fRead { 0 }, fWrite { 0 };
 };
 
@@ -289,6 +329,18 @@ protected:
             if (fDebug)
                 report();
         }
+        else if (std::strcmp(key, "voices") == 0)
+            parseVoices(value);
+        else if (std::strcmp(key, "engine") == 0)
+        {
+            float volume = 0.8f, bpm = 96.0f;
+            const ScopedSafeLocale ssl;
+            if (std::sscanf(value, "%f,%f", &volume, &bpm) == 2)
+            {
+                fEngineVolume.store(volume);
+                fEngineBpm.store(bpm);
+            }
+        }
         else if (std::strcmp(key, "notes") == 0)
             parseNotes(value);
         else if (std::strcmp(key, "panic") == 0)
@@ -349,6 +401,8 @@ protected:
     void activate() override
     {
         startPage();
+        fEngine.setSampleRate(getSampleRate());
+        fVoicePendingCount = 0;
         fFrames = 0;
         fHaveOffset = false;
         fPendingCount = 0;
@@ -385,6 +439,29 @@ protected:
         fFrames += frames;
 
         renderAudio(outputs[0], outputs[1], frames, blockStart, frameMs);
+
+        // Route C: the page's notes, played here at their sample offsets.
+        fEngine.setVolume(fEngineVolume.load(std::memory_order_relaxed));
+        fEngine.setTempo(fEngineBpm.load(std::memory_order_relaxed));
+        TimedVoice tv;
+        while (fVoicePendingCount < kMaxPending && fVoiceRing.pop(tv))
+            fVoicePending[fVoicePendingCount++] = tv;
+        for (uint32_t i = 0; i < fVoicePendingCount;)
+        {
+            const TimedVoice& p(fVoicePending[i]);
+            if (p.t < blockEnd)
+            {
+                if (p.t > blockStart - kStaleMs)
+                {
+                    const double off = (p.t - blockStart) / frameMs;
+                    fEngine.play(p.spec, off <= 0.0 ? 0 : std::min<int>(static_cast<int>(frames) - 1, static_cast<int>(off)));
+                }
+                fVoicePending[i] = fVoicePending[--fVoicePendingCount];
+                continue;
+            }
+            ++i;
+        }
+        fEngine.render(outputs[0], outputs[1], frames);
 
         // The host's time, for the page: its beat at this block's wall-clock time.
         const TimePosition& pos(getTimePosition());
@@ -577,6 +654,36 @@ private:
         d_stdout("twirl: audio buffered %.1f ms (target %.0f), underruns %u, ratio %.5f, page %u Hz, host %.0f Hz",
                  rate ? fAudio.available() * 1000.0 / rate : 0.0, fTargetNow.load(std::memory_order_relaxed),
                  fUnderruns.load(std::memory_order_relaxed), fStep.load(std::memory_order_relaxed), rate, getSampleRate());
+    }
+
+    // Route C
+    twirl::Engine fEngine;
+    VoiceRing<4096> fVoiceRing;
+    TimedVoice fVoicePending[kMaxPending];
+    uint32_t fVoicePendingCount = 0;
+    std::atomic<float> fEngineVolume { 0.8f }, fEngineBpm { 96.0f };
+
+    // "t,voice,pack,midi,vel,pan,y,nuance;…"; anything malformed is skipped.
+    void parseVoices(const char* s) noexcept
+    {
+        const ScopedSafeLocale ssl;
+        while (*s != '\0')
+        {
+            double t = 0;
+            int voice = 0, pack = 0, used = 0;
+            float midi = 60, vel = 0, pan = 0, y = 0.5f, nuance = 0;
+            if (std::sscanf(s, "%lf,%d,%d,%f,%f,%f,%f,%f%n", &t, &voice, &pack, &midi, &vel, &pan, &y, &nuance, &used) == 8
+                && voice >= 0 && voice <= 4 && std::isfinite(midi) && vel >= 0.0f)
+            {
+                fVoiceRing.push({ t, { static_cast<uint8_t>(voice), static_cast<uint8_t>(std::max(0, pack)), midi,
+                                       std::min(vel, 1.5f), std::max(-1.0f, std::min(1.0f, pan)), std::max(0.0f, std::min(1.0f, y)),
+                                       std::max(-1.0f, std::min(1.0f, nuance)) } });
+            }
+            const char* const semi = std::strchr(s, ';');
+            if (semi == nullptr)
+                break;
+            s = semi + 1;
+        }
     }
 
     NoteRing<4096> fRing;
