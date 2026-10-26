@@ -4,10 +4,11 @@
 from [music-suite](https://github.com/Enkerli/music-suite), as an **LV2,
 CLAP and VST3 plugin and a JACK standalone**, with no JUCE: built on
 [DPF](https://github.com/DISTRHO/DPF) (`develop`) and its web view. You
-draw in Twirl's own page; out of the plugin come **Twirl's own sound**
-(stereo, exactly as in a browser), its notes as **MIDI** for the host's
-instruments (Surge XT, a drum machine, anything), or both (the default): the
-page's Out picker (Everything → Sound and room). Beside it, **Follow host
+draw in Twirl's own page; out of the plugin come **Twirl's sound** (stereo,
+made in the plugin from the page's notes, all seven sound packs, the Drone
+and Warmth), its notes as **MIDI** for the host's instruments (Surge XT, a
+drum machine, anything), or both (the default): the page's Out picker
+(Everything → Sound and room). Beside it, **Follow host
 transport** takes the host's tempo, plays while its transport plays and on
 its beats.
 
@@ -84,7 +85,7 @@ loaded into a fresh one, the tempo and Out came back.
 
 `run()` records the host's tempo, whether it's rolling, and its beat at
 that block's wall-clock time; the plugin hands this to the page 20 times a
-second (`twirlHost`), with the measured audio lag. With **Follow host
+second (`twirlHost`). With **Follow host
 transport** on, Twirl takes the tempo, holds its loops (and the Drone) while
 the transport is stopped (strokes still sound as you draw), and keeps its
 beat on the host's, modulo 48 beats (whole bars in 2/4, 3/4, 4/4, 6/8):
@@ -92,15 +93,15 @@ jumping when the host starts or moves; otherwise averaging the error over
 about a second and correcting it only past 2 ms (each report's measure is
 noisy, ±10 ms; correcting every one moved every note by a few ms, which
 sounded unquantized). While the host is stopped, gives no transport, or
-stops calling the plugin, Twirl's clock stands still. With its own sound going to the host, it plays early by
-the audio lag, so the sound lands on the beat; with sound and MIDI, the MIDI
-is delayed by the same, so the two agree.
+stops calling the plugin, Twirl's clock stands still. The sound and the MIDI
+are both played at their exact times, so they agree with each other and with
+the host.
 
-Measured against Carla's transport at 120 BPM: Twirl's timing moves 0.03–0.08
-ms per 100 ms on average (1.6 ms at most), and sits on the host's beat
-within 2 ms on average; follows a tempo change and a jump; held while
-stopped. The page's clock and
-the plugin's agree (host reports arrive 12–37 ms after they're stamped).
+Measured against Carla's transport at 120 BPM: Twirl's timing moves 0.02–0.08
+ms per 100 ms on average (about 1 ms at most), and sits on the host's beat
+within about 1 ms on average; follows a tempo change and a jump; held while
+stopped. The page's clock and the plugin's agree (host reports arrive 12–37
+ms after they're stamped).
 
 ## Channels
 
@@ -108,49 +109,37 @@ As in Twirl's Web MIDI output: **pluck 1, bell 2, blip 3, drums and shaker
 10** (General MIDI: kick 36, snare 38, hat 42, shaker 70). Note lengths:
 drums 80 ms, pluck and blip 220, bell 600.
 
-## Twirl's sound made in the plugin (route C, in progress)
+## Twirl's sound, made in the plugin
 
 `TwirlEngine.hpp`: the page sends each note as it would have played it
 (voice, sound pack, exact pitch, velocity, pan, height, Vary's nuance), timed
-like the MIDI (`setState("voices", …)`); the engine plays it at its sample
-offset: no lag, in step with the MIDI and the host. Built from what Twirl's
-Web Audio recipes use: band-limited oscillators, Web Audio's biquads and
-ramps, its panner, the feedback delay, a compressor; a pool of 160 voices,
-no allocation while playing. In the plugin's Out picker: "sound made in the
-plugin (new)", alone or with MIDI.
+like the MIDI (`setState("voices", …)`), the volume, tempo and Warmth
+(`"engine"`), and the Drone (`"drone"`: its notes as Walk moves them, its
+level and space); the engine plays the notes at their sample offsets, so the
+sound is in step with the MIDI and the host. Microtonal pitches stay exact
+(the MIDI rounds them).
 
-So far Paper's five voices (every pack plays them), the delay, the volume,
-the Drone (its notes from the page as Walk moves them, its space, its level)
-and Warmth's room (hiss, crackle, wow and flutter). The other packs come
-next, then the page's stream (below) leaves the plugin. The bar (Alex): "Doesn't even need to sound
-that close to the current one, as long as it sounds ok."
+It's built from what Twirl's Web Audio recipes use: band-limited
+oscillators, Web Audio's biquads and ramps, its panner, the feedback delay, a
+compressor; struck tones as sines from rotating phasors. All seven packs
+(Paper, Mallets, Felt, Steel, Kalimba, Chip, Chimes; a voice a pack lacks is
+Paper's), the Drone (saw pairs, a breathing lowpass, the space's rotor, tape
+wobble) and Warmth's room (hiss, crackle, wow and flutter). A pool of 384
+voices, no allocation while playing. The bar (Alex): "Doesn't even need to
+sound that close to the current one, as long as it sounds ok."
 
-`make test` renders every voice at 8 pitches and 4 loudnesses, offline, and
-fails if one is silent, clips, isn't finite or doesn't die away; the Drone
-(swells, glides to a new chord, fades out when off) and Warmth (about -60 dB,
-silent at 0) too. It writes `build/render/*.wav` for listening.
+`make test` renders every pack's every voice at 8 pitches and 4 loudnesses,
+offline (with the plugin's own compiler flags), and fails if one is silent,
+clips, isn't finite or doesn't die away; the Drone (swells, glides to a new
+chord, fades out when off) and Warmth (about -60 dB, silent at 0) too; and
+a busy sheet in the heaviest pack (Chimes, 50 notes a second, ~120 voices)
+must take under a quarter of one core (it takes about 11 %). It writes
+`build/render/*.wav` for listening.
 
-Following the host with this sound (no lag to allow for), against Carla's
-transport: on the beat within about 1 ms on average.
-
-## How Twirl's sound gets to the host (the page's stream, for now)
-
-The page renders it with Web Audio, as in a browser; an AudioWorklet at the
-end of its graph sends it on in 512-frame chunks (16-bit stereo, base64,
-`setState("audio", "rate,wall,base64")`, `wall` when its first frame was
-rendered), about 94 a second, and plays silence to the speakers. The plugin buffers it against uneven arrival (100 ms to start;
-more only after a short gap, which a bigger buffer would have covered) and
-reads it back at a ratio nudged by at most ±0.5 % to hold that level, which
-absorbs the drift between the page's audio clock and the host's. After a
-stall, it dips for 3 ms rather than click, and catches up. The sound reaches
-the host about 100–120 ms after it was rendered: the plugin measures this
-from the chunks' times, and the page allows for it (above).
-
-`TWIRL_DEBUG=1` in the environment prints the buffer's state every 5 s.
-
-Measured (the JACK standalone, PipeWire, 48 kHz): no gaps and no clicks over
-20 s; with the page's main thread stalled 300 ms every 5 s, a gap per stall
-(as expected), no clicks, and the buffer back to 100 ms each time.
+Until 2026-10-26 the page streamed its own Web Audio into the plugin
+instead (exact, but ~120 ms late, through a jitter buffer); that left the
+plugin (Alex: "The option should leave the plugin (kept in the web
+versions)").
 
 ## How the notes get to the host on time
 

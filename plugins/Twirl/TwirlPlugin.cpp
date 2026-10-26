@@ -16,24 +16,14 @@
  * MIDI arriving at the plugin (the host's, and the page's sendNote()) is
  * passed through at once.
  *
- * The sound: the page renders it with Web Audio, exactly as in a browser, and
- * an AudioWorklet at the end of its graph sends it here in small chunks,
- * setState("audio", "rate,base64"), 16-bit stereo interleaved. Chunks arrive
- * unevenly (the page's main thread, the host's UI idle), so they wait in a
- * jitter buffer (100 ms to start, more after an underrun) and are read back
- * with linear interpolation at a ratio nudged to keep the buffer at its
- * target: that absorbs the drift between the page's audio clock and the
- * host's, and a page running at another sample rate. The sound therefore
- * lags the MIDI by about the buffer's length; each chunk carries the wall
- * time it was rendered for, so the plugin measures that lag and reports it.
- *
- * Route C (TwirlEngine.hpp): Twirl's sound made here. The page sends each
+ * The sound is made here (route C, TwirlEngine.hpp). The page sends each
  * note it would have played, timed like the MIDI: setState("voices",
  * "t,voice,pack,midi,vel,pan,y,nuance;…"), the volume, tempo and Warmth as
  * setState("engine", "volume,bpm,warmth"), and the Drone as setState("drone",
- * "on,level,side,rate,pan,trem,dop,split,hz,hz…"); the engine plays them,
- * the notes at their sample offsets, mixed with whatever the page still
- * streams.
+ * "on,level,side,rate,pan,trem,dop,split,hz,hz…"); the engine plays the notes
+ * at their sample offsets. (Until 2026-10-26 the page streamed its own Web
+ * Audio here instead, ~120 ms late; Alex: "The option should leave the
+ * plugin (kept in the web versions).")
  *
  * The page belongs to the plugin, not to its window (TwirlPage.hpp): it runs
  * from activate() to the end, window open or not, and its messages come here
@@ -43,8 +33,8 @@
  *
  * Following the host is the page's doing: run() records the host's tempo,
  * whether it's rolling and its beat at that moment's wall-clock time, and the
- * plugin hands that to the page 20 times a second (window.twirlHost), with
- * the audio lag; the page lines its beats up with the host's.
+ * plugin hands that to the page 20 times a second (window.twirlHost); the
+ * page lines its beats up with the host's.
  */
 
 #include "DistrhoPlugin.hpp"
@@ -136,101 +126,6 @@ private:
     std::atomic<uint32_t> fRead { 0 }, fWrite { 0 };
 };
 
-/** Stereo frames, single producer (setState), single consumer (run). */
-class AudioRing {
-public:
-    static constexpr uint32_t kSize = 1 << 16; // frames: 1.4 s at 48 kHz
-
-    uint32_t available() const noexcept
-    {
-        return (fWrite.load(std::memory_order_acquire) - fRead.load(std::memory_order_relaxed)) & (kSize - 1);
-    }
-
-    // Frames that don't fit are dropped (the reader is far behind: it skips ahead anyway).
-    uint32_t push(const float* const l, const float* const r, const uint32_t n) noexcept
-    {
-        uint32_t w = fWrite.load(std::memory_order_relaxed);
-        const uint32_t room = kSize - 1 - ((w - fRead.load(std::memory_order_acquire)) & (kSize - 1));
-        const uint32_t count = std::min(n, room);
-        for (uint32_t i = 0; i < count; ++i, w = (w + 1) & (kSize - 1))
-        {
-            fL[w] = l[i];
-            fR[w] = r[i];
-        }
-        fWrite.store(w, std::memory_order_release);
-        return count;
-    }
-
-    bool pop(float& l, float& r) noexcept
-    {
-        const uint32_t rd = fRead.load(std::memory_order_relaxed);
-        if (rd == fWrite.load(std::memory_order_acquire))
-            return false;
-        l = fL[rd];
-        r = fR[rd];
-        fRead.store((rd + 1) & (kSize - 1), std::memory_order_release);
-        return true;
-    }
-
-    uint32_t skip(uint32_t n) noexcept
-    {
-        n = std::min(n, available());
-        const uint32_t rd = fRead.load(std::memory_order_relaxed);
-        fRead.store((rd + n) & (kSize - 1), std::memory_order_release);
-        return n;
-    }
-
-private:
-    float fL[kSize], fR[kSize];
-    std::atomic<uint32_t> fRead { 0 }, fWrite { 0 };
-};
-
-/** When each audio chunk starts (in frames pushed so far) and the wall time it was rendered for. */
-struct ChunkStamp {
-    uint64_t frame;
-    double   wall;
-};
-
-/** Single producer (setState), single consumer (run), like NoteRing. */
-class StampRing {
-public:
-    static constexpr uint32_t kSize = 256;
-
-    void push(const ChunkStamp& c) noexcept
-    {
-        const uint32_t w = fWrite.load(std::memory_order_relaxed), next = (w + 1) % kSize;
-        if (next == fRead.load(std::memory_order_acquire))
-            return; // full: this chunk goes unmeasured
-        fBuf[w] = c;
-        fWrite.store(next, std::memory_order_release);
-    }
-
-    const ChunkStamp* front() const noexcept
-    {
-        const uint32_t r = fRead.load(std::memory_order_relaxed);
-        return r == fWrite.load(std::memory_order_acquire) ? nullptr : &fBuf[r];
-    }
-
-    void pop() noexcept
-    {
-        fRead.store((fRead.load(std::memory_order_relaxed) + 1) % kSize, std::memory_order_release);
-    }
-
-private:
-    ChunkStamp fBuf[kSize];
-    std::atomic<uint32_t> fRead { 0 }, fWrite { 0 };
-};
-
-static int b64(const char c) noexcept
-{
-    if (c >= 'A' && c <= 'Z') return c - 'A';
-    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-    if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '+') return 62;
-    if (c == '/') return 63;
-    return -1;
-}
-
 static double wallMs() noexcept
 {
     timespec ts;
@@ -263,7 +158,7 @@ protected:
     const char* getLabel() const override { return "twirl"; }
     const char* getDescription() const override
     {
-        return "Twirl, the gesture toy: draw a stroke, it loops on its own clock, and its notes come out as MIDI.";
+        return "Twirl, the gesture toy: draw a stroke, it loops on its own clock; its sound, its notes as MIDI, or both.";
     }
     const char* getMaker() const override { return "Enkerli"; }
     const char* getHomePage() const override { return "https://github.com/Enkerli/twirl-dpf"; }
@@ -325,13 +220,7 @@ protected:
         if (sep != nullptr)
             *sep = '\0';
 
-        if (std::strcmp(key, "audio") == 0)
-        {
-            parseAudio(value);
-            if (fDebug)
-                report();
-        }
-        else if (std::strcmp(key, "voices") == 0)
+        if (std::strcmp(key, "voices") == 0)
             parseVoices(value);
         else if (std::strcmp(key, "engine") == 0)
         {
@@ -375,9 +264,8 @@ protected:
         {
             const ScopedSafeLocale ssl;
             std::snprintf(js, sizeof(js),
-                          "window.twirlHost && twirlHost({tempo:%.4f,playing:%s,beat:%.6f,at:%.3f,lag:%.2f})",
-                          h.tempo, h.playing ? "true" : "false", h.beat, h.at,
-                          fHaveLag ? std::max(0.0, std::min(1000.0, fAudioLagMs.load())) : 0.0);
+                          "window.twirlHost && twirlHost({tempo:%.4f,playing:%s,beat:%.6f,at:%.3f})",
+                          h.tempo, h.playing ? "true" : "false", h.beat, h.at);
         }
         fPage.evaluate(js);
     }
@@ -411,14 +299,6 @@ protected:
         fFrames = 0;
         fHaveOffset = false;
         fPendingCount = 0;
-        fPriming = true;
-        fTargetMs = fTargetBefore = kTargetStartMs;
-        fGapFrames = 0.0;
-        fGain = 0.0f;
-        fFade = 1;
-        fPhase = 1.0;
-        fPrevL = fPrevR = fNextL = fNextR = 0.0f;
-        fHaveLag = false;
     }
 
     void run(const float**, float** const outputs, const uint32_t frames,
@@ -443,9 +323,10 @@ protected:
         const double blockEnd = blockStart + frames * frameMs;
         fFrames += frames;
 
-        renderAudio(outputs[0], outputs[1], frames, blockStart, frameMs);
+        std::memset(outputs[0], 0, sizeof(float) * frames);
+        std::memset(outputs[1], 0, sizeof(float) * frames);
 
-        // Route C: the page's notes, played here at their sample offsets.
+        // The page's notes, played here at their sample offsets.
         fEngine.setVolume(fEngineVolume.load(std::memory_order_relaxed));
         fEngine.setTempo(fEngineBpm.load(std::memory_order_relaxed));
         fEngine.setWarmth(fEngineWarmth.load(std::memory_order_relaxed));
@@ -562,25 +443,6 @@ private:
     static constexpr uint32_t kMaxPending = 2048;
     static constexpr uint32_t kMaxOut = 512;
     static constexpr double kStaleMs = 1000.0; // older than this is from a stall or a restore: dropped
-    static constexpr double kTargetStartMs = 100.0, kTargetMaxMs = 400.0;
-
-    AudioRing fAudio;
-    std::atomic<uint32_t> fPageRate { 0 };
-    bool fPriming = true;          // waiting for the buffer to fill to its target
-    double fTargetMs = kTargetStartMs, fTargetBefore = kTargetStartMs;
-    double fGapFrames = 0.0;       // after an underrun, how long nothing came
-    double fPhase = 1.0;           // between fPrev and fNext, in source frames
-    float fPrevL = 0.0f, fPrevR = 0.0f, fNextL = 0.0f, fNextR = 0.0f;
-    static constexpr float kFadeStep = 1.0f / 128.0f; // about 3 ms
-    float fGain = 0.0f;            // fades out before a jump, in after one or a wait
-    int fFade = 1;                 // -1 fading out, 1 fading in, 0 steady
-    float fDecodeL[4096], fDecodeR[4096];
-    StampRing fStamps;
-    uint64_t fPushed = 0;          // frames into the ring so far (setState's thread)
-    uint64_t fPopped = 0;          // frames out of it so far, read or skipped (run's)
-    std::atomic<double> fAudioLagMs { 0.0 }; // read by the page's thread
-    std::atomic<bool> fHaveLag { false };
-
     // The host's time, written by run(), read by the page's thread (a seqlock).
     struct HostTime {
         double tempo = 0.0;        // 0: the host gives none
@@ -657,25 +519,7 @@ private:
         fPage.evaluate("window.twirlRestore && twirlRestore('" + saved + "')");
     }
 
-    // TWIRL_DEBUG=1 in the environment: a line every 5 s on stdout, from setState's thread.
-    const bool fDebug = std::getenv("TWIRL_DEBUG") != nullptr;
-    std::atomic<uint32_t> fUnderruns { 0 };
-    std::atomic<double> fStep { 1.0 }, fTargetNow { kTargetStartMs };
-    double fLastReport = 0.0;
-
-    void report() noexcept
-    {
-        const double now = wallMs();
-        if (now - fLastReport < 5000.0)
-            return;
-        fLastReport = now;
-        const uint32_t rate = fPageRate.load(std::memory_order_relaxed);
-        d_stdout("twirl: audio buffered %.1f ms (target %.0f), underruns %u, ratio %.5f, page %u Hz, host %.0f Hz",
-                 rate ? fAudio.available() * 1000.0 / rate : 0.0, fTargetNow.load(std::memory_order_relaxed),
-                 fUnderruns.load(std::memory_order_relaxed), fStep.load(std::memory_order_relaxed), rate, getSampleRate());
-    }
-
-    // Route C
+    // The sound (route C)
     twirl::Engine fEngine;
     VoiceRing<4096> fVoiceRing;
     TimedVoice fVoicePending[kMaxPending];
@@ -770,166 +614,6 @@ private:
         {
             --fSounding[ch][note];
         }
-    }
-
-    void renderAudio(float* const outL, float* const outR, const uint32_t frames,
-                     const double blockStart, const double frameMs) noexcept
-    {
-        const double sr = getSampleRate();
-        const uint32_t pageRate = fPageRate.load(std::memory_order_acquire);
-        const uint32_t target = static_cast<uint32_t>(fTargetMs * (pageRate ? pageRate : sr) / 1000.0);
-        const uint32_t fill = fAudio.available();
-
-        if (fPriming)
-        {
-            if (fill >= target)
-            {
-                fPriming = false;
-                // Only a short gap (the sound came back within 50 ms) was jitter
-                // a bigger buffer would have covered. A long one was a stall, a
-                // pause or the window closing: the buffer goes back to what it was.
-                if (fGapFrames > sr / 20)
-                    fTargetMs = fTargetBefore;
-                // More came while it waited (a burst): start from the target. It's
-                // silent now, so the jump can't click; the sound fades in.
-                if (fill > target)
-                    fPopped += fAudio.skip(fill - target);
-                fGain = 0.0f;
-                fFade = 1;
-            }
-            else
-            {
-                if (fill == 0)
-                    fGapFrames += frames;
-            }
-        }
-        // Far too much waiting (a burst after the page stalled): the sound dips
-        // for a few ms (no click) while the reader jumps to the target.
-        if (! fPriming && fFade == 0 && fill > 2 * target)
-            fFade = -1;
-
-        if (fPriming || pageRate == 0)
-        {
-            std::memset(outL, 0, sizeof(float) * frames);
-            std::memset(outR, 0, sizeof(float) * frames);
-            return;
-        }
-
-        // Read faster when the buffer is above its target, slower below: at most
-        // ±0.5 %, a pitch change of under a tenth of a semitone, never heard.
-        const double err = (static_cast<double>(fAudio.available()) - target) / target;
-        const double step = (pageRate / sr) * (1.0 + std::max(-0.005, std::min(0.005, err * 0.005)));
-        fStep.store(step, std::memory_order_relaxed);
-        fTargetNow.store(fTargetMs, std::memory_order_relaxed);
-
-        for (uint32_t i = 0; i < frames; ++i)
-        {
-            while (fPhase >= 1.0)
-            {
-                fPrevL = fNextL;
-                fPrevR = fNextR;
-                if (! fAudio.pop(fNextL, fNextR))
-                {
-                    // Underrun: silence, wait for more, and keep more from now on.
-                    std::memset(outL + i, 0, sizeof(float) * (frames - i));
-                    std::memset(outR + i, 0, sizeof(float) * (frames - i));
-                    fUnderruns.fetch_add(1, std::memory_order_relaxed);
-                    fPriming = true;
-                    fGapFrames = 0;
-                    fTargetBefore = fTargetMs;
-                    fTargetMs = std::min(kTargetMaxMs, fTargetMs * 1.25);
-                    fNextL = fNextR = 0.0f;
-                    return;
-                }
-                fPhase -= 1.0;
-                measureLag(fPopped++, blockStart + i * frameMs);
-            }
-            if (fFade != 0)
-            {
-                fGain += fFade * kFadeStep;
-                if (fFade < 0 && fGain <= 0.0f)
-                {
-                    const uint32_t now = fAudio.available();
-                    if (now > target)
-                        fPopped += fAudio.skip(now - target);
-                    fGain = 0.0f;
-                    fFade = 1;
-                }
-                else if (fFade > 0 && fGain >= 1.0f)
-                {
-                    fGain = 1.0f;
-                    fFade = 0;
-                }
-            }
-            const float f = static_cast<float>(fPhase);
-            outL[i] = (fPrevL + (fNextL - fPrevL) * f) * fGain;
-            outR[i] = (fPrevR + (fNextR - fPrevR) * f) * fGain;
-            fPhase += step;
-        }
-    }
-
-    // The audio frame `frame` (counted from the start) is leaving the plugin at
-    // wall time `wall`: if a chunk started there, the lag is how late that is.
-    void measureLag(const uint64_t frame, const double wall) noexcept
-    {
-        while (const ChunkStamp* const c = fStamps.front())
-        {
-            if (c->frame > frame)
-                return;
-            if (c->frame == frame)
-            {
-                const double lag = wall - c->wall, was = fAudioLagMs.load(std::memory_order_relaxed);
-                fAudioLagMs.store(fHaveLag.load(std::memory_order_relaxed) ? was + (lag - was) * 0.05 : lag, std::memory_order_relaxed);
-                fHaveLag.store(true, std::memory_order_relaxed);
-            }
-            fStamps.pop(); // used, or skipped over
-        }
-    }
-
-    // "rate,wall,base64": 16-bit little-endian stereo frames, interleaved; `wall`
-    // the ms since the epoch the first frame was rendered for.
-    void parseAudio(const char* s) noexcept
-    {
-        char* end = nullptr;
-        const long rate = std::strtol(s, &end, 10);
-        if (end == s || *end != ',' || rate < 8000 || rate > 384000)
-            return;
-        s = end + 1;
-        const double wall = std::strtod(s, &end);
-        if (end == s || *end != ',')
-            return;
-        fPageRate.store(static_cast<uint32_t>(rate), std::memory_order_release);
-        fStamps.push({ fPushed, wall });
-        s = end + 1;
-
-        uint32_t n = 0;
-        uint8_t bytes[4];
-        int nbytes = 0;
-        uint32_t acc = 0;
-        int bits = 0;
-        for (; *s != '\0' && *s != '='; ++s)
-        {
-            const int v = b64(*s);
-            if (v < 0)
-                return;
-            acc = (acc << 6) | static_cast<uint32_t>(v);
-            bits += 6;
-            if (bits < 8)
-                continue;
-            bits -= 8;
-            bytes[nbytes++] = static_cast<uint8_t>(acc >> bits);
-            if (nbytes < 4)
-                continue;
-            nbytes = 0;
-            fDecodeL[n] = static_cast<int16_t>(bytes[0] | (bytes[1] << 8)) / 32768.0f;
-            fDecodeR[n] = static_cast<int16_t>(bytes[2] | (bytes[3] << 8)) / 32768.0f;
-            if (++n == 4096)
-            {
-                fPushed += fAudio.push(fDecodeL, fDecodeR, n);
-                n = 0;
-            }
-        }
-        fPushed += fAudio.push(fDecodeL, fDecodeR, n);
     }
 
     // "t,status,note,velocity;…"; anything malformed is skipped.

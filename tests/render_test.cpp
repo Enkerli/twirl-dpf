@@ -9,6 +9,7 @@
 
 #include "../plugins/Twirl/TwirlEngine.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -39,9 +40,11 @@ int main()
 {
     const int sr = 48000, block = 256;
     const char* const names[] = { "pluck", "bell", "blip", "drum", "shake" };
+    const char* const packs[] = { "paper", "mallets", "felt", "steel", "kalimba", "chip", "chimes" };
     int failures = 0;
     static Engine engine; // large (its delay line): not on the stack
 
+    for (int pack = 0; pack < 7; ++pack)
     for (int voice = 0; voice < 5; ++voice)
     {
         engine.setSampleRate(sr);
@@ -57,7 +60,7 @@ int main()
             for (const float midi : pitches)
             {
                 const float y = (n % 3) * 0.33f + 0.1f;
-                NoteSpec spec { static_cast<uint8_t>(voice), 0, midi, vel, (n % 5 - 2) * 0.4f, y, (n % 3 - 1) * 0.5f };
+                NoteSpec spec { static_cast<uint8_t>(voice), static_cast<uint8_t>(pack), midi, vel, (n % 5 - 2) * 0.4f, y, (n % 3 - 1) * 0.5f };
                 const int at = n * static_cast<int>(0.4 * sr);
                 // render up to this note, then start it
                 while (static_cast<int>(L.size()) + block <= at)
@@ -69,8 +72,8 @@ int main()
                 engine.play(spec, at - static_cast<int>(L.size()));
                 ++n;
             }
-        // and 4 s of tail
-        for (int k = 0; k < 4 * sr / block; ++k)
+        // and 6 s of tail (Chimes ring for 4.5 s)
+        for (int k = 0; k < 6 * sr / block; ++k)
         {
             float l[block] = {}, r[block] = {};
             engine.render(l, r, block);
@@ -89,9 +92,9 @@ int main()
         }
         const double rms = std::sqrt(sum / (2.0 * L.size()));
         const bool ok = finite && peak > 0.01 && peak < 1.0 && tail < 0.001 && engine.sounding() == 0;
-        std::printf("%-6s peak %.3f  rms %.4f  last 0.5 s %.6f  %s\n", names[voice], peak, rms, tail, ok ? "ok" : "FAIL");
+        std::printf("%-8s %-6s peak %.3f  rms %.4f  last 0.5 s %.6f  %s\n", packs[pack], names[voice], peak, rms, tail, ok ? "ok" : "FAIL");
         failures += ok ? 0 : 1;
-        writeWav(std::string("build/render/") + names[voice] + ".wav", L, R, sr);
+        writeWav(std::string("build/render/") + packs[pack] + "-" + names[voice] + ".wav", L, R, sr);
     }
 
     // Render `seconds` into L/R (appending).
@@ -160,6 +163,42 @@ int main()
         std::printf("warmth rms %.1f dB  peak %.4f  at 0: %.1e  %s\n", db, peak, p0, ok ? "ok" : "FAIL");
         failures += ok ? 0 : 1;
         writeWav("build/render/warmth.wav", L, R, sr);
+    }
+
+    // A busy sheet in the heaviest pack: Chimes (bells of five partials ringing
+    // 4.5 s), 50 notes a second (Alex's busiest report: 53) across its voices,
+    // for 10 s. Must take well under real time: a quarter of one core at most.
+    // Then all bells at 60 a second, for information.
+    for (int extreme = 0; extreme < 2; ++extreme)
+    {
+        engine.setSampleRate(sr);
+        engine.setWarmth(0.5f);
+        std::vector<float> L, R;
+        const auto start = std::chrono::steady_clock::now();
+        int peakVoices = 0;
+        for (int k = 0; k < 10 * sr / block; ++k)
+        {
+            const int t = k * block;
+            const int rate = extreme ? 60 : 50;
+            for (int note = t * rate / sr; note < (t + block) * rate / sr; ++note)
+            {
+                const uint8_t voice = extreme ? 1 : static_cast<uint8_t>(note % 3);   // bell, or pluck, bell, blip
+                NoteSpec spec { voice, 6, 60.0f + (note * 7) % 24, 0.8f, 0.0f, 0.5f, 0.0f };
+                engine.play(spec, note * sr / rate - t);
+            }
+            float l[block] = {}, r[block] = {};
+            engine.render(l, r, block);
+            L.insert(L.end(), l, l + block); R.insert(R.end(), r, r + block);
+            peakVoices = std::max(peakVoices, engine.sounding());
+        }
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        double peak, rms; bool finite;
+        stats(L, R, 0, L.size(), peak, rms, finite);
+        const bool ok = finite && peak < 1.0 && (extreme || secs < 10.0 * 0.25);
+        std::printf("stress   %s: %d voices, %.1f%% of one core, peak %.3f  %s\n",
+                    extreme ? "chimes, all bells, 60/s (for information)" : "chimes, 50 notes/s", peakVoices, secs / 10.0 * 100.0, peak,
+                    extreme ? "" : ok ? "ok" : "FAIL");
+        failures += ok ? 0 : 1;
     }
     return failures;
 }

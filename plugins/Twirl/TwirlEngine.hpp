@@ -7,8 +7,9 @@
  * same building blocks, approximately: Alex, 2026-10-26, "Doesn't even need
  * to sound that close to the current one, as long as it sounds ok."
  *
- * Step 1: Paper's five voices (every pack plays them for now), the delay,
- * the volume and a compressor. Step 3 (first, as Alex asked): the Drone and
+ * Step 1: Paper's five voices, the delay, the volume and a compressor.
+ * Step 2: the six other packs (Mallets, Felt, Steel, Kalimba, Chip,
+ * Chimes); a voice a pack doesn't have is Paper's, as in the page. Step 3 (first, as Alex asked): the Drone and
  * Warmth's room (hiss, crackle, wow and flutter). Real-time safe: fixed
  * pools, no allocation, no locks.
  */
@@ -159,6 +160,10 @@ struct NoteSpec {
 };
 
 enum : uint8_t { kPluck = 0, kBell, kBlip, kDrum, kShake };
+// The packs, in Twirl's PACK_ORDER (share codes store the index).
+enum : uint8_t { kPaper = 0, kMallets, kFelt, kSteel, kKalimba, kChip, kChimes };
+// What a sounding voice is, beyond Paper's own five.
+enum : uint8_t { kGeneric = 10, kPartials, kVibe };
 
 /** The Drone as the page has it now (its notes already through scale, root,
  *  Walk; its "space" as numbers: Twirl's DRONE_SPACES). */
@@ -190,6 +195,21 @@ struct Voice {
     float noiseAmp = 1.0f;
     int cutEvery = 0;
 
+    // kGeneric: an oscillator (and a second at a ratio of it) and/or noise,
+    // through a filter whose cutoff may move, under one envelope.
+    bool useOsc = false, useNoise = false, useFilter = false;
+    double osc2Ratio = 0, osc2Level = 0;
+
+    // kPartials: up to five sines (rotating phasors: cheap, exact enough), each its own envelope.
+    static constexpr int kMaxPartials = 5;
+    int pn = 0;
+    double pre[kMaxPartials] = {}, pim[kMaxPartials] = {}, pc[kMaxPartials] = {}, ps[kMaxPartials] = {};
+    Env pe[kMaxPartials];
+    int pleft[kMaxPartials] = {};
+
+    // kVibe: a slow tremolo
+    double trem = 0;
+
     void setPan(const float pan) noexcept // Web Audio's StereoPannerNode, mono in: equal power
     {
         const double x = (std::max(-1.0f, std::min(1.0f, pan)) + 1.0) * 0.5;
@@ -200,7 +220,7 @@ struct Voice {
 
 class Engine {
 public:
-    static constexpr int kVoices = 160;
+    static constexpr int kVoices = 384;
 
     void setSampleRate(const double sr) noexcept
     {
@@ -251,7 +271,16 @@ public:
     void setTempo(const double bpm) noexcept { if (bpm > 0) fDelaySeconds = 0.75 * 60.0 / bpm; }
 
     /** Start a note `offset` samples into the next render. */
+    /** Start a note `offset` samples into the next render, in its pack's sound. */
     void play(const NoteSpec& n, const int offset) noexcept
+    {
+        if (playPack(n, offset))
+            return;
+        playPaper(n, offset);
+    }
+
+    /** Paper's five voices (and every pack's fallback). */
+    void playPaper(const NoteSpec& n, const int offset) noexcept
     {
         if (n.voice == kShake)
         {
@@ -348,21 +377,71 @@ public:
         const double sr = fSr;
         const int delaySamples = std::max(1, std::min(static_cast<int>(fDelaySeconds * sr), fDelay.size - 1));
 
-        for (uint32_t i = 0; i < frames; ++i)
+        // The voices, one at a time over the block (each voice's state stays in
+        // cache), into dry and delay-send buses; then the rest, sample by sample.
+        static constexpr uint32_t kChunk = 256;
+        for (uint32_t c0 = 0; c0 < frames; c0 += kChunk)
         {
-            double dryL = 0, dryR = 0, wet = 0;
-            for (Voice& v : fVoices)
+        const uint32_t cn = std::min(kChunk, frames - c0);
+        std::memset(fBusL, 0, sizeof(double) * cn);
+        std::memset(fBusR, 0, sizeof(double) * cn);
+        std::memset(fBusWet, 0, sizeof(double) * cn);
+        for (Voice& v : fVoices)
+        {
+            if (! v.active)
+                continue;
+            uint32_t i = 0;
+            if (v.wait > 0)
             {
-                if (! v.active)
-                    continue;
-                if (v.wait > 0) { --v.wait; continue; }
-                const double s = tick(v);
-                dryL += s * v.gainL;
-                dryR += s * v.gainR;
-                wet += s * (v.gainL + v.gainR) * 0.5 * v.send;
-                if (--v.left <= 0)
-                    v.active = false;
+                const uint32_t skip = std::min<uint32_t>(cn, static_cast<uint32_t>(v.wait));
+                v.wait -= static_cast<int>(skip);
+                i = skip;
             }
+            const double gl = v.gainL, gr = v.gainR, gw = (v.gainL + v.gainR) * 0.5 * v.send;
+            if (v.kind == kPartials)
+            {
+                // All its partials together, sample by sample: each partial is a chain
+                // (every sample needs the one before), so stepping them side by side
+                // lets the processor overlap them. The heaviest voices' fast path.
+                const uint32_t m = std::min<uint32_t>(cn - i, static_cast<uint32_t>(std::max(0, v.left)));
+                const int pn = v.pn;
+                for (uint32_t k = 0; k < m; ++k)
+                {
+                    double x = 0;
+                    for (int p = 0; p < pn; ++p)
+                    {
+                        if (v.pleft[p] <= 0) continue;
+                        --v.pleft[p];
+                        const double re = v.pre[p] * v.pc[p] - v.pim[p] * v.ps[p];
+                        v.pim[p] = v.pre[p] * v.ps[p] + v.pim[p] * v.pc[p];
+                        v.pre[p] = re;
+                        x += v.pim[p] * v.pe[p].next();
+                    }
+                    fTmp[k] = x;
+                }
+                for (uint32_t k = 0; k < m; ++k)
+                {
+                    const double x = fTmp[k];
+                    fBusL[i + k] += x * gl; fBusR[i + k] += x * gr; fBusWet[i + k] += x * gw;
+                }
+                v.left -= static_cast<int>(m);
+                if (v.left <= 0) v.active = false;
+                continue;
+            }
+            for (; i < cn; ++i)
+            {
+                const double s = tick(v);
+                fBusL[i] += s * gl;
+                fBusR[i] += s * gr;
+                fBusWet[i] += s * gw;
+                if (--v.left <= 0) { v.active = false; break; }
+            }
+        }
+
+        for (uint32_t k = 0; k < cn; ++k)
+        {
+            const uint32_t i = c0 + k;
+            double dryL = fBusL[k], dryR = fBusR[k], wet = fBusWet[k];
 
             double droneL = 0, droneR = 0;
             if (fDrone.sounding)
@@ -388,6 +467,7 @@ public:
             const double g = compress(std::max(std::fabs(l), std::fabs(r)));
             outL[i] += static_cast<float>(l * g);
             outR[i] += static_cast<float>(r * g);
+        }
         }
     }
 
@@ -417,6 +497,7 @@ private:
     Biquad fDelayLp;
 
     float fWarmth = 0.5f;
+    double fBusL[256], fBusR[256], fBusWet[256], fTmp[256];
 
     // ---- the Drone --------------------------------------------------------
     struct Drone {
@@ -595,6 +676,215 @@ private:
         return *best;
     }
 
+    // ---- the other packs (index.html, section 3a) ----------------------------
+
+    /** A fresh voice, waiting `offset` samples, panned. */
+    Voice& fresh(const uint8_t kind, const int offset, const float pan, const float send, const double seconds) noexcept
+    {
+        Voice& v = take();
+        v.kind = kind;
+        v.wait = std::max(0, offset);
+        v.sr = fSr;
+        v.f1.reset(); v.f2.reset();
+        v.osc1.phase = v.osc2.phase = 0.0;
+        v.noiseLeft = v.osc2Left = 0;
+        v.cutEvery = 0;
+        v.useOsc = v.useNoise = v.useFilter = false;
+        v.osc2Ratio = v.osc2Level = 0;
+        v.pn = 0;
+        v.trem = 0;
+        v.setPan(pan);
+        v.send = send;
+        v.left = static_cast<int>(seconds * fSr);
+        v.active = true;
+        return v;
+    }
+
+    /** One oscillator, its pitch from `f0` (gliding to `f1` over `glide` s if given), under an envelope. */
+    void tone(const int offset, const float pan, const float send, const Wave wave, const double f0, const double f1, const double glide,
+              const double peak, const double decay, const double attack, const double stop) noexcept
+    {
+        Voice& v = fresh(kGeneric, offset, pan, send, stop);
+        v.useOsc = true;
+        v.osc1.wave = wave;
+        v.freq1.set(f0);
+        if (glide > 0) v.freq1.rampTo(f1, glide * fSr);
+        v.env1.start(fSr, peak, decay, attack);
+    }
+
+    /** Noise through a filter, under an envelope. */
+    void noiseHit(const int offset, const float pan, const float send, const Filter type, const double freq, const double q,
+                  const double peak, const double decay, const double attack, const double dur) noexcept
+    {
+        Voice& v = fresh(kGeneric, offset, pan, send, dur);
+        v.useNoise = v.useFilter = true;
+        v.noiseLeft = static_cast<int>(dur * fSr);
+        v.f1.set(type, freq, q, fSr);
+        v.env1.start(fSr, peak, decay, attack);
+    }
+
+    struct Partial { double mul, amp, decay; };
+
+    /** Twirl's partials(): a struck tone from sines, each with its level and decay. */
+    void partials(const int offset, const float pan, const double f0, const double vel, const Partial* const list, const int count,
+                  const double attack = 0.003, const float send = 0.5f) noexcept
+    {
+        double longest = 0;
+        for (int i = 0; i < count; ++i) longest = std::max(longest, list[i].decay);
+        Voice& v = fresh(kPartials, offset, pan, send, attack + longest + 0.05);
+        v.pn = std::min(count, Voice::kMaxPartials);
+        for (int i = 0; i < v.pn; ++i)
+        {
+            const double w = 2.0 * kPi * std::min(f0 * list[i].mul, fSr * 0.45) / fSr;
+            v.pre[i] = 1.0; v.pim[i] = 0.0;
+            v.pc[i] = std::cos(w); v.ps[i] = std::sin(w);
+            v.pe[i].start(fSr, list[i].amp * vel, list[i].decay, attack);
+            v.pleft[i] = static_cast<int>((attack + list[i].decay + 0.05) * fSr);
+        }
+    }
+
+    /** Mallets' drums: log drum, woodblock, claves (Steel and Kalimba use them too). */
+    void malletDrum(const NoteSpec& n, const int offset) noexcept
+    {
+        const double y = n.y;
+        const int kind = y < 0.28 ? 0 : y < 0.62 ? 1 : 2;
+        const double f = kind == 2 ? mtof(n.midi - 12.0) : kind == 1 ? 750.0 + (0.62 - y) * 600.0 : 2400.0;
+        tone(offset, n.pan, 0.25f, Wave::Sine, f * (kind == 2 ? 1.6 : 1.0), f, 0.03,
+             (kind == 2 ? 0.7 : 0.35) * n.vel, kind == 2 ? 0.3 : 0.05, 0.001, 0.4);
+    }
+
+    /** Felt's pluck: a triangle and a sine an octave up, through a lowpass that closes over 1.2 s. */
+    void feltPluck(const int offset, const float pan, const double midi, const double vel) noexcept
+    {
+        Voice& v = fresh(kGeneric, offset, pan, 0.45f, 1.4);
+        v.useOsc = v.useFilter = true;
+        v.osc1.wave = Wave::Triangle;
+        v.osc2.wave = Wave::Sine;
+        v.freq1.set(mtof(midi));
+        v.osc2Ratio = 2.003; v.osc2Level = 1.0;
+        v.cutType = Filter::Lowpass; v.cutQ = 1.0;
+        v.cutoff.set(900.0 + 1600.0 * vel);
+        v.cutoff.rampTo(400.0, 1.2 * fSr);
+        v.env1.start(fSr, 0.24 * vel, 1.3, 0.012);
+    }
+
+    /** Kalimba's pluck: a clean tine, a high inharmonic ping, a tiny click. */
+    void kalimbaPluck(const int offset, const float pan, const double midi, const double vel) noexcept
+    {
+        static const Partial tine[] = { { 1, 0.26, 1.1 }, { 5.95, 0.05, 0.06 } };
+        partials(offset, pan, mtof(midi), vel, tine, 2, 0.002, 0.45f);
+        noiseHit(offset, pan, 0.2f, Filter::Bandpass, 3500.0, 1.0, 0.05 * vel, 0.01, 0.001, 0.03);
+    }
+
+    /** The pack's own voice, if it has one (false: Paper's). */
+    bool playPack(const NoteSpec& n, const int o) noexcept
+    {
+        const double vel = n.vel, nu = n.nuance, m = n.midi;
+        const float pan = n.pan;
+        switch (n.pack)
+        {
+        case kMallets:
+            switch (n.voice)
+            {
+            case kPluck: { // marimba: a fundamental and a quick 4th partial
+                static const Partial p[] = { { 1, 0.3, 0.5 }, { 3.93, 0.08, 0.08 } };
+                partials(o, pan, mtof(m), vel, p, 2, 0.002, 0.4f);
+                return true;
+            }
+            case kBell: { // vibraphone-ish: a sine with a slow shimmer
+                Voice& v = fresh(kVibe, o, pan, 0.7f, 1.8);
+                v.useOsc = true;
+                v.osc1.wave = Wave::Sine;
+                v.freq1.set(mtof(m + 12));
+                v.env1.start(fSr, 0.18 * vel, 1.6, 0.003);
+                return true;
+            }
+            case kBlip: // xylophone: bright and short
+                tone(o, pan, 0.6f, Wave::Triangle, mtof(m + 24), 0, 0, 0.16 * vel, 0.12, 0.001, 0.2);
+                return true;
+            case kDrum:
+                malletDrum(n, o);
+                return true;
+            }
+            return false;
+        case kChip:
+            switch (n.voice)
+            {
+            case kPluck: // a square, no frills
+                tone(o, pan, 0.4f, Wave::Square, mtof(m), 0, 0, 0.09 * vel, 0.22, 0.002, 0.3);
+                return true;
+            case kBell: { // a fast up-arpeggio, the chiptune chord
+                const int iv[] = { 0, 4, 7, 12 };
+                for (int i = 0; i < 4; ++i)
+                    tone(o + static_cast<int>(i * 0.045 * fSr), pan, 0.5f, Wave::Square, mtof(m + 12 + iv[i]), 0, 0, 0.06 * vel, 0.06, 0.001, 0.1);
+                return true;
+            }
+            case kBlip: // the classic pitch-drop blip
+                tone(o, pan, 0.5f, Wave::Square, mtof(m + 24), mtof(m + 12), 0.08, 0.07 * vel, 0.1, 0.001, 0.15);
+                return true;
+            case kDrum: {
+                const double y = n.y;
+                const int kind = y < 0.28 ? 0 : y < 0.62 ? 1 : 2;
+                if (kind == 2) // a square kick
+                    tone(o, pan * 0.3f, 0.1f, Wave::Square, 220.0, 45.0, 0.1, 0.35 * vel, 0.14, 0.001, 0.2);
+                else           // noise: a hat (highpass) or a snare (lowpass)
+                    noiseHit(o, pan, 0.2f, kind == 0 ? Filter::Highpass : Filter::Lowpass, kind == 0 ? 8000.0 : 5000.0, 1.0,
+                             (kind == 0 ? 0.2 : 0.35) * vel, kind == 0 ? 0.03 : 0.12, 0.001, 0.16);
+                return true;
+            }
+            case kShake:
+                noiseHit(o, pan, 0.2f, Filter::Highpass, 9000.0, 1.0, 0.18 * vel, 0.025, 0.001, 0.05);
+                return true;
+            }
+            return false;
+        case kFelt: // a soft, felted upright: round attack, warm tail
+            switch (n.voice)
+            {
+            case kPluck: feltPluck(o, pan, m, vel); return true;
+            case kBell:  feltPluck(o, pan, m + 12, vel * 0.8); return true;
+            case kBlip: {
+                static const Partial p[] = { { 1, 0.12, 0.18 }, { 2, 0.03, 0.08 } };
+                partials(o, pan, mtof(m + 24), vel, p, 2, 0.008);
+                return true;
+            }
+            }
+            return false;
+        case kSteel: // steelpan: bright partials at 1, 2 and 3
+            switch (n.voice)
+            {
+            case kPluck: { static const Partial p[] = { { 1, 0.22, 0.9 }, { 2, 0.1, 0.5 }, { 3.01, 0.05, 0.25 } }; partials(o, pan, mtof(m), vel, p, 3, 0.006, 0.6f); return true; }
+            case kBell:  { static const Partial p[] = { { 1, 0.18, 1.2 }, { 2, 0.08, 0.6 }, { 3.01, 0.04, 0.3 } }; partials(o, pan, mtof(m + 12), vel, p, 3, 0.006, 0.7f); return true; }
+            case kBlip:  { static const Partial p[] = { { 1, 0.12, 0.25 }, { 2, 0.04, 0.12 } }; partials(o, pan, mtof(m + 24), vel, p, 2, 0.003, 0.6f); return true; }
+            case kDrum:  malletDrum(n, o); return true;
+            }
+            return false;
+        case kKalimba: // thumb piano
+            switch (n.voice)
+            {
+            case kPluck: kalimbaPluck(o, pan, m, vel); return true;
+            case kBell:  kalimbaPluck(o, pan, m + 12, vel * 0.85); return true;
+            case kBlip:  { static const Partial p[] = { { 1, 0.13, 0.3 }, { 5.95, 0.03, 0.03 } }; partials(o, pan, mtof(m + 24), vel, p, 2, 0.002, 0.45f); return true; }
+            case kDrum:  malletDrum(n, o); return true;
+            }
+            return false;
+        case kChimes: { // wind chimes: tuned bars, inharmonic partials, long quiet tails
+            const double k = 1.0 + 0.006 * nu; // Vary: some strikes clang more
+            switch (n.voice)
+            {
+            case kBell: {
+                const Partial p[] = { { 1, 0.09, 4.5 }, { 1.0016, 0.04, 4 }, { 2.756 * k, 0.05, 2.4 }, { 5.404 * k, 0.025, 1.1 }, { 8.933 * k, 0.012, 0.5 } };
+                partials(o, pan, mtof(m + 12), vel, p, 5, 0.002, 0.9f);
+                return true;
+            }
+            case kPluck: { static const Partial p[] = { { 1, 0.14, 1.4 }, { 2.756, 0.05, 0.6 }, { 5.404, 0.02, 0.25 } }; partials(o, pan, mtof(m), vel, p, 3, 0.003, 0.6f); return true; }
+            case kBlip:  { static const Partial p[] = { { 1, 0.07, 1.2 }, { 2.756, 0.025, 0.5 } }; partials(o, pan, mtof(m + 24), vel, p, 2, 0.001, 0.9f); return true; }
+            }
+            return false;
+        }
+        }
+        return false;
+    }
+
     void startShakeGrain(const NoteSpec& n, const int offset, const float amp) noexcept
     {
         Voice& v = take();
@@ -619,6 +909,41 @@ private:
         const double sr = v.sr;
         switch (v.kind)
         {
+        case kGeneric: {
+            double x = 0;
+            if (v.useOsc)
+            {
+                const double f = v.freq1.next();
+                x = v.osc1.next(f, sr);
+                if (v.osc2Level > 0) x += v.osc2.next(f * v.osc2Ratio, sr) * v.osc2Level;
+            }
+            if (v.useNoise && v.noiseLeft-- > 0) x += fRand.bipolar();
+            if (v.useFilter)
+            {
+                if (v.cutoff.left > 0 && v.cutEvery-- <= 0) { v.f1.set(v.cutType, v.cutoff.value, v.cutQ, sr); v.cutEvery = 15; }
+                if (v.cutoff.left > 0) v.cutoff.next();
+                x = v.f1.next(x);
+            }
+            return x * v.env1.next();
+        }
+        case kPartials: {
+            double x = 0;
+            for (int i = 0; i < v.pn; ++i)
+            {
+                if (v.pleft[i]-- <= 0) continue;
+                const double re = v.pre[i] * v.pc[i] - v.pim[i] * v.ps[i];
+                v.pim[i] = v.pre[i] * v.ps[i] + v.pim[i] * v.pc[i];
+                v.pre[i] = re;
+                x += v.pim[i] * v.pe[i].next();
+            }
+            // Kalimba's click and the like ride along as their own voices.
+            return x;
+        }
+        case kVibe: {
+            v.trem += 5.5 / sr; v.trem -= std::floor(v.trem);
+            const double tremGain = 0.75 + 0.25 * std::sin(2 * kPi * v.trem);
+            return v.osc1.next(v.freq1.value, sr) * v.env1.next() * tremGain;
+        }
         case kPluck: {
             if (v.cutEvery-- <= 0) { v.f1.set(v.cutType, v.cutoff.value, v.cutQ, sr); v.cutEvery = 15; }
             v.cutoff.next();
