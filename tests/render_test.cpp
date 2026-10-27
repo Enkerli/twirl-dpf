@@ -40,11 +40,11 @@ int main()
 {
     const int sr = 48000, block = 256;
     const char* const names[] = { "pluck", "bell", "blip", "drum", "shake" };
-    const char* const packs[] = { "paper", "mallets", "felt", "steel", "kalimba", "chip", "chimes" };
+    const char* const packs[] = { "paper", "mallets", "felt", "steel", "kalimba", "chip", "chimes", "musicbox", "foley" };
     int failures = 0;
     static Engine engine; // large (its delay line): not on the stack
 
-    for (int pack = 0; pack < 7; ++pack)
+    for (int pack = 0; pack < 9; ++pack)
     for (int voice = 0; voice < 5; ++voice)
     {
         engine.setSampleRate(sr);
@@ -60,7 +60,7 @@ int main()
             for (const float midi : pitches)
             {
                 const float y = (n % 3) * 0.33f + 0.1f;
-                NoteSpec spec { static_cast<uint8_t>(voice), static_cast<uint8_t>(pack), midi, vel, (n % 5 - 2) * 0.4f, y, (n % 3 - 1) * 0.5f };
+                NoteSpec spec { static_cast<uint8_t>(voice), static_cast<uint8_t>(pack), midi, vel, (n % 5 - 2) * 0.4f, y, (n % 3 - 1) * 0.5f, 1.0f, 0 };
                 const int at = n * static_cast<int>(0.4 * sr);
                 // render up to this note, then start it
                 while (static_cast<int>(L.size()) + block <= at)
@@ -183,7 +183,7 @@ int main()
             for (int note = t * rate / sr; note < (t + block) * rate / sr; ++note)
             {
                 const uint8_t voice = extreme ? 1 : static_cast<uint8_t>(note % 3);   // bell, or pluck, bell, blip
-                NoteSpec spec { voice, 6, 60.0f + (note * 7) % 24, 0.8f, 0.0f, 0.5f, 0.0f };
+                NoteSpec spec { voice, 6, 60.0f + (note * 7) % 24, 0.8f, 0.0f, 0.5f, 0.0f, 1.0f, 0 };
                 engine.play(spec, note * sr / rate - t);
             }
             float l[block] = {}, r[block] = {};

@@ -23,7 +23,7 @@
  *
  * The sound is made here (route C, TwirlEngine.hpp). The page sends each
  * note it would have played, timed like the MIDI: setState("voices",
- * "t,voice,pack,midi,vel,pan,y,nuance,ring;…"), the volume, tempo and Warmth as
+ * "t,voice,pack,midi,vel,pan,y,nuance,ring,shaker;…"), the volume, tempo and Warmth as
  * setState("engine", "volume,bpm,warmth"), and the Drone as setState("drone",
  * "on,level,side,rate,pan,trem,dop,split,hz,hz…"); the engine plays the notes
  * at their sample offsets. (Until 2026-10-26 the page streamed its own Web
@@ -717,7 +717,7 @@ private:
         if (kind != 0x90 || ev.data[2] == 0)
             return;
         twirl::NoteSpec spec { twirl::kPluck, fEnginePack.load(std::memory_order_relaxed), static_cast<float>(note),
-                               ev.data[2] / 127.0f, 0.0f, 0.5f, 0.0f, 1.0f };
+                               ev.data[2] / 127.0f, 0.0f, 0.5f, 0.0f, 1.0f, 0 };
         switch (ch)
         {
         case 1: spec.voice = twirl::kBell; spec.midi -= 12; break; // Twirl sends bell and blip an octave up
@@ -726,7 +726,11 @@ private:
             // Drums by note: Twirl's (36 kick, 38 snare, 42 hat, 70 shaker) and General MIDI's neighbours.
             // Their height picks the kind; the pitch tunes it (Twirl's drums are pitched).
             spec.midi = 60;
-            if (note == 69 || note == 70 || note == 82) { spec.voice = twirl::kShake; spec.y = 0.5f; }
+            if (note == 54 || note == 69 || note == 70 || note == 82)   // shakers: tambourine, cabasa, egg, rain stick
+            {
+                spec.voice = twirl::kShake; spec.y = 0.5f;
+                spec.shaker = note == 54 ? 3 : note == 69 ? 2 : note == 82 ? 4 : 0;
+            }
             else if (note <= 36) { spec.voice = twirl::kDrum; spec.y = 0.8f; }
             else if (note == 42 || note == 44 || note == 46 || note >= 49) { spec.voice = twirl::kDrum; spec.y = 0.1f; }
             else { spec.voice = twirl::kDrum; spec.y = 0.45f; }
@@ -798,7 +802,7 @@ private:
         fDroneSeq.fetch_add(1, std::memory_order_acq_rel);
     }
 
-    // "t,voice,pack,midi,vel,pan,y,nuance[,ring];…"; anything malformed is skipped.
+    // "t,voice,pack,midi,vel,pan,y,nuance[,ring[,shaker]];…"; anything malformed is skipped.
     void parseVoices(const char* s) noexcept
     {
         const ScopedSafeLocale ssl;
@@ -808,15 +812,18 @@ private:
             int voice = 0, pack = 0, used = 0;
             float midi = 60, vel = 0, pan = 0, y = 0.5f, nuance = 0;
             float ring = 1.0f;
-            int more = 0;
+            int more = 0, shaker = 0, more2 = 0;
             if (std::sscanf(s, "%lf,%d,%d,%f,%f,%f,%f,%f%n", &t, &voice, &pack, &midi, &vel, &pan, &y, &nuance, &used) == 8
                 && voice >= 0 && voice <= 4 && std::isfinite(midi) && vel >= 0.0f)
             {
                 if (s[used] == ',' && std::sscanf(s + used, ",%f%n", &ring, &more) == 1 && ! std::isfinite(ring))   // the accent's ring (newer pages)
                     ring = 1.0f;
+                if (more > 0 && s[used + more] == ',')                                                       // the loop's shaker (newer still)
+                    std::sscanf(s + used + more, ",%d%n", &shaker, &more2);
                 fVoiceRing.push({ t, { static_cast<uint8_t>(voice), static_cast<uint8_t>(std::max(0, pack)), midi,
                                        std::min(vel, 1.5f), std::max(-1.0f, std::min(1.0f, pan)), std::max(0.0f, std::min(1.0f, y)),
-                                       std::max(-1.0f, std::min(1.0f, nuance)), std::max(1.0f, std::min(2.0f, ring)) } });
+                                       std::max(-1.0f, std::min(1.0f, nuance)), std::max(1.0f, std::min(2.0f, ring)),
+                                       static_cast<uint8_t>(std::max(0, std::min(twirl::kShakerCount - 1, shaker))) } });
             }
             const char* const semi = std::strchr(s, ';');
             if (semi == nullptr)

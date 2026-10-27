@@ -162,11 +162,29 @@ struct NoteSpec {
     float y;           // height on the sheet, 0 (top) .. 1
     float nuance;      // Vary's -1..1 (an accent brightens it)
     float ring;        // an accent's longer ring, 1..1.5 (0, from an older page: 1)
+    uint8_t shaker;    // the loop's shaker: Twirl's SHAKER_KINDS (egg, maraca, cabasa, tambourine, rain stick)
 };
 
 enum : uint8_t { kPluck = 0, kBell, kBlip, kDrum, kShake };
 // The packs, in Twirl's PACK_ORDER (share codes store the index).
-enum : uint8_t { kPaper = 0, kMallets, kFelt, kSteel, kKalimba, kChip, kChimes };
+enum : uint8_t { kPaper = 0, kMallets, kFelt, kSteel, kKalimba, kChip, kChimes, kMusicBox, kFoley };
+
+/** Twirl's SHAKERS (its index.html, section 3): a few grains of noise through a bandpass
+ *  (brighter higher up) and a highpass. Grains: when (s), loudness, a random spread (s). */
+struct ShakerKind {
+    int count; double grain[10][3];
+    double base, span, q, hp, decay, decayVel;
+};
+static const ShakerKind kShakers[] = {
+    { 2, { { 0, 1, 0 }, { 0.011, 0.35, 0.006 } }, 3200, 5200, 1.4, 1800, 0.045, 0.07 },                                        // egg
+    { 3, { { 0, 1, 0 }, { 0.018, 0.55, 0.004 }, { 0.031, 0.25, 0.004 } }, 4200, 4000, 1.0, 2500, 0.03, 0.05 },                  // maraca
+    { 4, { { 0, 0.6, 0 }, { 0.014, 1, 0.003 }, { 0.028, 0.8, 0.003 }, { 0.044, 0.45, 0.004 } }, 6500, 3000, 2.5, 4000, 0.035, 0.03 },   // cabasa
+    { 3, { { 0, 1, 0 }, { 0.007, 0.7, 0.002 }, { 0.019, 0.45, 0.003 } }, 7000, 2500, 9.0, 3000, 0.12, 0.1 },                   // tambourine
+    { 10, { { 0, 1, 0.02 }, { 0.045, 0.925, 0.02 }, { 0.09, 0.85, 0.02 }, { 0.135, 0.775, 0.02 }, { 0.18, 0.7, 0.02 },
+            { 0.225, 0.625, 0.02 }, { 0.27, 0.55, 0.02 }, { 0.315, 0.475, 0.02 }, { 0.36, 0.4, 0.02 }, { 0.405, 0.325, 0.02 } },
+      2400, 3600, 3.0, 1500, 0.05, 0.03 },                                                                                         // rain stick
+};
+static constexpr int kShakerCount = sizeof(kShakers) / sizeof(kShakers[0]);
 // What a sounding voice is, beyond Paper's own five.
 enum : uint8_t { kGeneric = 10, kPartials, kVibe };
 
@@ -301,10 +319,12 @@ public:
     {
         if (n.voice == kShake)
         {
-            // Beads on a shell: a grain and a smaller rattle 11–17 ms later (and ±3 ms of jitter).
+            // The loop's shaker: its grains, each at its time and a little random spread (and ±3 ms of jitter overall).
+            const ShakerKind& k = kShakers[n.shaker < kShakerCount ? n.shaker : 0];
             const int jitter = static_cast<int>(fRand.bipolar() * 0.003 * fSr);
-            startShakeGrain(n, std::max(0, offset + jitter), 1.0f);
-            startShakeGrain(n, std::max(0, offset + jitter + static_cast<int>((0.011 + fRand.next() * 0.006) * fSr)), 0.35f);
+            for (int i = 0; i < k.count; ++i)
+                startShakeGrain(n, std::max(0, offset + jitter + static_cast<int>((k.grain[i][0] + fRand.next() * k.grain[i][2]) * fSr)),
+                                static_cast<float>(k.grain[i][1]), k);
             return;
         }
         Voice& v = take();
@@ -789,6 +809,14 @@ private:
     }
 
     /** Kalimba's pluck: a clean tine, a high inharmonic ping, a tiny click. */
+    /** Music box: a tine and its pin's click (Twirl's tine()). */
+    void tine(const int offset, const float pan, const double midi, const double vel) noexcept
+    {
+        static const Partial p[] = { { 1, 0.2, 1.6 }, { 2, 0.025, 0.5 }, { 6.27, 0.05, 0.12 }, { 17.55, 0.015, 0.03 } };
+        partials(offset, pan, mtof(midi), vel, p, 4, 0.001, 0.55f);
+        noiseHit(offset, pan, 0.2f, Filter::Bandpass, 6000.0, 1.0, 0.03 * vel, 0.008, 0.001, 0.02);
+    }
+
     void kalimbaPluck(const int offset, const float pan, const double midi, const double vel) noexcept
     {
         static const Partial tine[] = { { 1, 0.26, 1.1 }, { 5.95, 0.05, 0.06 } };
@@ -887,6 +915,56 @@ private:
             case kDrum:  malletDrum(n, o); return true;
             }
             return false;
+        case kMusicBox: // a comb's steel tines (Twirl's MUSICBOX): a clamped bar's high partial, a pin's click
+            switch (n.voice)
+            {
+            case kPluck: tine(o, pan, m + 12, vel); return true;
+            case kBell:  tine(o, pan, m + 24, vel * 0.8); return true;
+            case kBlip:  { static const Partial p[] = { { 1, 0.1, 0.35 }, { 6.27, 0.03, 0.03 } }; partials(o, pan, mtof(m + 24), vel, p, 2, 0.001, 0.5f); return true; }
+            }
+            return false;
+        case kFoley: // the kitchen as a kit (Twirl's FOLEY)
+            switch (n.voice)
+            {
+            case kPluck: { // a length of metal tube, struck
+                static const Partial p[] = { { 1, 0.16, 1.1 }, { 2.76, 0.07, 0.45 }, { 5.4, 0.035, 0.18 }, { 8.93, 0.015, 0.07 } };
+                partials(o, pan, mtof(m), vel, p, 4, 0.001, 0.5f);
+                noiseHit(o, pan, 0.2f, Filter::Bandpass, 2500.0, 1.0, 0.05 * vel, 0.015, 0.001, 0.03);
+                return true;
+            }
+            case kBell: { // a glass, tapped with a spoon
+                static const Partial p[] = { { 1, 0.09, 0.9 }, { 2.32, 0.04, 0.35 }, { 4.25, 0.02, 0.12 } };
+                partials(o, pan, mtof(m + 24), vel, p, 3, 0.001, 0.6f);
+                noiseHit(o, pan, 0.2f, Filter::Highpass, 6000.0, 1.0, 0.04 * vel, 0.004, 0.001, 0.01);
+                return true;
+            }
+            case kBlip: { // a rubber duck: a squeak that bends up
+                const double f = mtof(m + 12);
+                tone(o, pan, 0.3f, Wave::Square, f * 0.8, f * 1.15, 0.07, 0.06 * vel, 0.14, 0.01, 0.2);
+                return true;
+            }
+            case kDrum: {
+                const double y = n.y;
+                if (y >= 0.62) // a rubber mallet on a pot's base: a soft thump
+                {
+                    tone(o, pan * 0.3f, 0.1f, Wave::Sine, 120.0, 55.0, 0.05, 0.7 * vel, 0.16, 0.006, 0.25);
+                    noiseHit(o, pan * 0.3f, 0.1f, Filter::Lowpass, 600.0, 1.0, 0.15 * vel, 0.03, 0.004, 0.05);
+                }
+                else if (y >= 0.28) // a wooden spoon on a board
+                {
+                    noiseHit(o, pan, 0.3f, Filter::Bandpass, 1100.0, 1.5, 0.5 * vel, 0.035, 0.001, 0.06);
+                    tone(o, pan, 0.2f, Wave::Triangle, 420.0, 0, 0, 0.25 * vel, 0.04, 0.001, 0.08);
+                }
+                else // a pot lid, rung
+                {
+                    static const Partial p[] = { { 1, 0.08, 0.6 }, { 1.59, 0.07, 0.5 }, { 2.14, 0.06, 0.4 }, { 2.65, 0.05, 0.3 }, { 3.16, 0.04, 0.25 } };
+                    partials(o, pan, 520.0, vel, p, 5, 0.001, 0.4f);
+                    noiseHit(o, pan, 0.3f, Filter::Highpass, 5000.0, 1.0, 0.15 * vel, 0.02, 0.001, 0.04);
+                }
+                return true;
+            }
+            }
+            return false;
         case kChimes: { // wind chimes: tuned bars, inharmonic partials, long quiet tails
             const double k = 1.0 + 0.006 * nu; // Vary: some strikes clang more
             switch (n.voice)
@@ -905,18 +983,18 @@ private:
         return false;
     }
 
-    void startShakeGrain(const NoteSpec& n, const int offset, const float amp) noexcept
+    void startShakeGrain(const NoteSpec& n, const int offset, const float amp, const ShakerKind& k) noexcept
     {
         Voice& v = take();
-        const double sr = fSr, bright = 1.0 - n.y, vel = n.vel;
+        const double sr = fSr, bright = 1.0 - n.y, vel = n.vel, decay = k.decay + k.decayVel * vel;
         v.wait = offset;
         v.kind = kShake;
         v.sr = sr;
         v.f1.reset(); v.f2.reset();
-        v.f1.set(Filter::Bandpass, (3200.0 + 5200.0 * bright) * (0.92 + fRand.next() * 0.16), 1.4, sr);
-        v.f2.set(Filter::Highpass, 1800.0, 1.0, sr);
-        v.env1.start(sr, 0.5 * vel * amp, 0.045 + 0.07 * vel, 0.007);
-        v.noiseLeft = static_cast<int>(0.16 * sr);
+        v.f1.set(Filter::Bandpass, (k.base + k.span * bright) * (0.92 + fRand.next() * 0.16), k.q, sr);
+        v.f2.set(Filter::Highpass, k.hp, 1.0, sr);
+        v.env1.start(sr, 0.5 * vel * amp, decay, 0.007);
+        v.noiseLeft = static_cast<int>(std::max(0.16, decay * 1.6) * sr);
         v.osc2Left = 0;
         v.setPan(n.pan);
         v.send = 0.25f;

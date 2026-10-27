@@ -4,7 +4,7 @@
  * Dry (no delay, no Warmth), through Twirl's volume (0.8), mono ((L + R) / 2,
  * as the page's one-channel offline rendering mixes it), 48 kHz float32.
  *
- *   build/render_notes <out dir>   with lines on stdin: name pack voice midi vel y seconds
+ *   build/render_notes <out dir>   with lines on stdin: name pack voice midi vel y seconds shaker
  *
  * pack and voice as the page sends them (PACK_ORDER; 0 pluck … 4 shake), midi
  * the exact pitch. Writes <out dir>/<name>.f32.
@@ -24,16 +24,16 @@ int main(int argc, char** argv)
     const int sr = 48000, block = 256;
     static Engine engine; // large (its delay line): not on the stack
     char name[256];
-    int pack = 0, voice = 0;
+    int pack = 0, voice = 0, shaker = 0;
     float midi = 60, vel = 0.8f, y = 0.5f, seconds = 2;
-    while (std::scanf("%255s %d %d %f %f %f %f", name, &pack, &voice, &midi, &vel, &y, &seconds) == 7)
+    while (std::scanf("%255s %d %d %f %f %f %f %d", name, &pack, &voice, &midi, &vel, &y, &seconds, &shaker) == 8)
     {
         engine.setSampleRate(sr); // and reset: nothing left from the note before
         engine.setTempo(96);
         engine.setWarmth(0.0f);
         engine.setDelayOn(false);
         engine.setVolume(0.8f);
-        const NoteSpec n { static_cast<uint8_t>(voice), static_cast<uint8_t>(pack), midi, vel, 0.0f, y, 0.0f, 1.0f };
+        const NoteSpec n { static_cast<uint8_t>(voice), static_cast<uint8_t>(pack), midi, vel, 0.0f, y, 0.0f, 1.0f, static_cast<uint8_t>(shaker) };
         engine.play(n, 0);
         const int frames = static_cast<int>(seconds * sr);
         std::vector<float> L(block), R(block), mono;

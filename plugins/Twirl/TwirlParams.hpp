@@ -27,7 +27,7 @@ static const char* const kVoicings[] = { "Low fifth", "Fifth", "Triad", "Open" }
 static const char* const kSpaces[] = { "Still", "Drifting", "Binaural", "Rotating" };
 static const char* const kWalkWays[] = { "A progression", "Sway", "By fifths", "Climb", "Wander" };
 static const char* const kWalkPaces[] = { "Every bar", "Every 2 bars", "Every 4 bars", "Every 8 bars" };
-static const char* const kPacks[] = { "Paper", "Mallets", "Felt", "Steel", "Kalimba", "Chip", "Chimes" };
+static const char* const kPacks[] = { "Paper", "Mallets", "Felt", "Steel", "Kalimba", "Chip", "Chimes", "Music box", "Foley" };
 static const char* const kScales[] = {
     "Major pentatonic", "Minor pentatonic", "Suspended", "Hirajoshi",
     "Ionian", "Dorian", "Phrygian", "Lydian", "Mixolydian", "Aeolian",
@@ -53,7 +53,7 @@ static const ParamSpec kParams[] = {
     { "walk",          "Walk",                  kSwitch, 0, 1,    0,    nullptr,    "" },
     { "walk_way",      "Walk way",              kChoice, 0, 4,    0,    kWalkWays,  "" },
     { "walk_pace",     "Walk pace",             kChoice, 0, 3,    1,    kWalkPaces, "" },
-    { "pack",          "Sounds",                kChoice, 0, 6,    0,    kPacks,     "" },
+    { "pack",          "Sounds",                kChoice, 0, 8,    0,    kPacks,     "" },
     { "scale",         "Scale",                 kChoice, 0, 26,   0,    kScales,    "" },
     { "root",          "Root",                  kChoice, 0, 11,   0,    kRoots,     "" },
     { "vary",          "Vary",                  kSwitch, 0, 1,    1,    nullptr,    "" },
