@@ -170,19 +170,20 @@ enum : uint8_t { kPluck = 0, kBell, kBlip, kDrum, kShake };
 enum : uint8_t { kPaper = 0, kMallets, kFelt, kSteel, kKalimba, kChip, kChimes, kMusicBox, kFoley };
 
 /** Twirl's SHAKERS (its index.html, section 3): a few grains of noise through a bandpass
- *  (brighter higher up) and a highpass. Grains: when (s), loudness, a random spread (s). */
+ *  (brighter higher up) and a highpass. Grains: when (s), loudness, a random spread (s).
+ *  `level` lifts the thinner ones to sound as loud as the egg. */
 struct ShakerKind {
     int count; double grain[10][3];
-    double base, span, q, hp, decay, decayVel;
+    double base, span, q, hp, decay, decayVel, level;
 };
 static const ShakerKind kShakers[] = {
-    { 2, { { 0, 1, 0 }, { 0.011, 0.35, 0.006 } }, 3200, 5200, 1.4, 1800, 0.045, 0.07 },                                        // egg
-    { 3, { { 0, 1, 0 }, { 0.018, 0.55, 0.004 }, { 0.031, 0.25, 0.004 } }, 4200, 4000, 1.0, 2500, 0.03, 0.05 },                  // maraca
-    { 4, { { 0, 0.6, 0 }, { 0.014, 1, 0.003 }, { 0.028, 0.8, 0.003 }, { 0.044, 0.45, 0.004 } }, 6500, 3000, 2.5, 4000, 0.035, 0.03 },   // cabasa
-    { 3, { { 0, 1, 0 }, { 0.007, 0.7, 0.002 }, { 0.019, 0.45, 0.003 } }, 7000, 2500, 9.0, 3000, 0.12, 0.1 },                   // tambourine
+    { 2, { { 0, 1, 0 }, { 0.011, 0.35, 0.006 } }, 3200, 5200, 1.4, 1800, 0.045, 0.07, 1 },                                        // egg
+    { 3, { { 0, 1, 0 }, { 0.018, 0.55, 0.004 }, { 0.031, 0.25, 0.004 } }, 4200, 4000, 1.0, 2500, 0.03, 0.05, 1 },                  // maraca
+    { 4, { { 0, 0.6, 0 }, { 0.014, 1, 0.003 }, { 0.028, 0.8, 0.003 }, { 0.044, 0.45, 0.004 } }, 6500, 3000, 2.5, 4000, 0.035, 0.03, 1.5 },   // cabasa
+    { 3, { { 0, 1, 0 }, { 0.007, 0.7, 0.002 }, { 0.019, 0.45, 0.003 } }, 7000, 2500, 9.0, 3000, 0.12, 0.1, 1.8 },                   // tambourine
     { 10, { { 0, 1, 0.02 }, { 0.045, 0.925, 0.02 }, { 0.09, 0.85, 0.02 }, { 0.135, 0.775, 0.02 }, { 0.18, 0.7, 0.02 },
             { 0.225, 0.625, 0.02 }, { 0.27, 0.55, 0.02 }, { 0.315, 0.475, 0.02 }, { 0.36, 0.4, 0.02 }, { 0.405, 0.325, 0.02 } },
-      2400, 3600, 3.0, 1500, 0.05, 0.03 },                                                                                         // rain stick
+      2400, 3600, 3.0, 1500, 0.05, 0.03, 1.6 },                                                                                         // rain stick
 };
 static constexpr int kShakerCount = sizeof(kShakers) / sizeof(kShakers[0]);
 // What a sounding voice is, beyond Paper's own five.
@@ -993,7 +994,7 @@ private:
         v.f1.reset(); v.f2.reset();
         v.f1.set(Filter::Bandpass, (k.base + k.span * bright) * (0.92 + fRand.next() * 0.16), k.q, sr);
         v.f2.set(Filter::Highpass, k.hp, 1.0, sr);
-        v.env1.start(sr, 0.5 * vel * amp, decay, 0.007);
+        v.env1.start(sr, 0.5 * vel * amp * k.level, decay, 0.007);
         v.noiseLeft = static_cast<int>(std::max(0.16, decay * 1.6) * sr);
         v.osc2Left = 0;
         v.setPan(n.pan);
