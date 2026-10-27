@@ -3,7 +3,7 @@
  * looks (the page's level, numbers…). In a browser these live in the page's
  * storage; in the plugin, the web view's storage doesn't last (Qt 6's default
  * profile is off the record) and isn't shared, so they live here instead, in
- * $XDG_DATA_HOME/twirl (~/.local/share/twirl): scenes/Scene 1.json…, My
+ * $XDG_DATA_HOME/twirl (~/.local/share/twirl): scenes/Scene 1.json…, presets/<name>.json (named scenes), My
  * toys.json, settings/… .json. Plain JSON, the page's own; a scene file pastes
  * into Twirl's Paste a code (in the plugin or a browser).
  *
@@ -64,7 +64,7 @@ public:
         return js;
     }
 
-    /** From the page: "path\ncontent". Written whole (a temporary file, renamed). */
+    /** From the page: "path\ncontent". Written whole (a temporary file, renamed); empty content deletes it. */
     void write(const char* const msg)
     {
         const char* const nl = std::strchr(msg, '\n');
@@ -74,6 +74,12 @@ public:
         if (! safe(path, false))
             return;
         const std::string full = fDir + "/" + path;
+        if (nl[1] == '\0')                     // sent empty: the page deleted it (a named scene)
+        {
+            std::remove(full.c_str());
+            fSeen.erase(path);
+            return;
+        }
         makeDirs(full.substr(0, full.rfind('/')));
         const std::string tmp = full + ".tmp";
         std::FILE* const f = std::fopen(tmp.c_str(), "wb");
