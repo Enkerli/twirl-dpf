@@ -59,6 +59,7 @@ static const ParamSpec kParams[] = {
     { "vary",          "Vary",                  kSwitch, 0, 1,    1,    nullptr,    "" },
     { "evolve",        "Evolve",                kSwitch, 0, 1,    1,    nullptr,    "" },
     { "morph",         "Morph",                 kSwitch, 0, 1,    1,    nullptr,    "" },
+    { "midi_in_only",  "Incoming MIDI only",    kSwitch, 0, 1,    0,    nullptr,    "" },   // the sheet silent: an instrument
 };
 
 static constexpr uint32_t kParamCount = sizeof(kParams) / sizeof(kParams[0]);

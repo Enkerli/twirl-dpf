@@ -13,7 +13,7 @@ transport** takes the host's tempo, plays while its transport plays and on
 its beats.
 
 **Twirl keeps playing with its window closed**, and its sheet, Out choice
-and Follow host transport are **saved with the host's project**. Twenty of
+and Follow host transport are **saved with the host's project**. Twenty-one of
 its controls are **host parameters**, automatable (below).
 
 Twirl's page isn't forked: `make` copies `apps/twirl/index.html` from a
@@ -150,6 +150,17 @@ notes in the second's sound. Checked with two standalones: B, with no loops
 of its own, played A's notes in Kalimba while connected, and only Warmth's
 hiss once disconnected.
 
+**Incoming MIDI only** (Everything → Sound and room, and a host parameter):
+the sheet stays silent (every loop as if muted, no meetings; their passes go
+on, so it comes back in step) and Twirl is an instrument: it plays only what
+comes in, in its sheet's sounds (pack, Warmth, the Drone). A second Twirl
+set so, on channel 10, is a drum kit in one instance, in any pack. Without
+it, the receiving Twirl's own sheet plays too (Alex, in Bitwig: channel 10
+into a second Twirl "played its own scene instead of playing the drum
+notes"). ⇧Q's report shows the note-ons that came in, by channel (`midiIn`),
+to see what the host really sends. Checked in Carla (LV2): the parameter
+silences the sheet and back, eight channel-10 notes counted as `ch10: 8`.
+
 Until 2026-10-26 the page streamed its own Web Audio into the plugin
 instead (exact, but ~120 ms late, through a jitter buffer); that left the
 plugin (Alex: "The option should leave the plugin (kept in the web
@@ -157,10 +168,11 @@ versions)").
 
 ## Parameters
 
-Twenty of the page's controls are the host's parameters, automatable and
-saved with the project (`TwirlParams.hpp`): Volume, Tempo, Follow host
+Twenty-one of the page's controls are the host's parameters, automatable
+and saved with the project (`TwirlParams.hpp`): Volume, Tempo, Follow host
 transport, Swing, Warmth, Air, Drone (on, level, voicing, space), Lock,
-Walk (on, way, pace), Sounds (the pack), Scale, Root, Vary, Evolve, Morph.
+Walk (on, way, pace), Sounds (the pack), Scale, Root, Vary, Evolve, Morph,
+Incoming MIDI only.
 Choices are lists with their names, switches on/off. The page holds the same
 list in the same order (`HOST_PARAMS`); both append only, as hosts keep
 parameters by number.

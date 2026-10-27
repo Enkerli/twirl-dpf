@@ -338,12 +338,16 @@ protected:
         HostTime h;
         if (! readHostTime(h))
             return;
-        char js[256];
+        char js[512];
         {
             const ScopedSafeLocale ssl;
-            std::snprintf(js, sizeof(js),
-                          "window.twirlHost && twirlHost({tempo:%.4f,playing:%s,beat:%.6f,at:%.3f})",
-                          h.tempo, h.playing ? "true" : "false", h.beat, h.at);
+            int n = std::snprintf(js, sizeof(js),
+                                  "window.twirlHost && twirlHost({tempo:%.4f,playing:%s,beat:%.6f,at:%.3f,midiIn:[",
+                                  h.tempo, h.playing ? "true" : "false", h.beat, h.at);
+            for (int c = 0; c < 16 && n > 0 && n < static_cast<int>(sizeof(js)); ++c)
+                n += std::snprintf(js + n, sizeof(js) - n, c ? ",%u" : "%u", fMidiInNotes[c].load(std::memory_order_relaxed));
+            if (n > 0 && n < static_cast<int>(sizeof(js)))
+                std::snprintf(js + n, sizeof(js) - n, "]})");
         }
         fPage.evaluate(js);
     }
@@ -452,7 +456,11 @@ protected:
             }
             ++i;
         }
-        // Synth mode: MIDI coming in, played by the engine at its frame.
+        // Synth mode: MIDI coming in, played by the engine at its frame. Counted by
+        // channel either way, for the page's report (⇧Q: did channel 10 arrive?).
+        for (uint32_t i = 0; i < midiInCount; ++i)
+            if (midiIn[i].size >= 3 && (midiIn[i].data[0] & 0xF0) == 0x90 && midiIn[i].data[2] != 0)
+                fMidiInNotes[midiIn[i].data[0] & 0x0F].fetch_add(1, std::memory_order_relaxed);
         if (fEngineSound.load(std::memory_order_relaxed))
             for (uint32_t i = 0; i < midiInCount; ++i)
                 synthNote(midiIn[i]);
@@ -669,6 +677,7 @@ private:
     std::atomic<float> fEngineVolume { 0.8f }, fEngineBpm { 96.0f }, fEngineWarmth { 0.5f };
     std::atomic<uint8_t> fEnginePack { 0 };
     std::atomic<bool> fEngineSound { true };
+    std::atomic<uint32_t> fMidiInNotes[16] {};   // note-ons coming in, by channel (the page's report)
 
     /** A note-on coming in, as Twirl would have played it (note-offs: its voices ring out). */
     void synthNote(const MidiEvent& ev) noexcept
