@@ -28,6 +28,9 @@
  * Audio here instead, ~120 ms late; Alex: "The option should leave the
  * plugin (kept in the web versions).")
  *
+ * Twirl's scenes, My toys and look are files every instance shares
+ * (TwirlFiles.hpp, ~/.local/share/twirl), not the web view's storage.
+ *
  * The page belongs to the plugin, not to its window (TwirlPage.hpp): it runs
  * from activate() to the end, window open or not, and its messages come here
  * directly. Twirl's state (its sheet, its Out choice, Follow host transport)
@@ -54,6 +57,7 @@
 #include "DistrhoPlugin.hpp"
 #include "DistrhoPluginUtils.hpp"
 #include "TwirlEngine.hpp"
+#include "TwirlFiles.hpp"
 #include "TwirlPage.hpp"
 #include "TwirlParams.hpp"
 #include "TwirlShared.hpp"
@@ -325,6 +329,8 @@ protected:
         }
         else if (std::strcmp(key, "params") == 0)
             parseParams(value);
+        else if (std::strcmp(key, "file") == 0)
+            fFiles.write(value);
     }
 
     // Every 10 ms: the host's time for the page, 20 times a second.
@@ -333,7 +339,13 @@ protected:
         if (fPageStopping || ! fPageSaidReady)
             return;
         sendParamsToPage();
-        if (++fIdleCount % 5 != 0)
+        if (++fIdleCount % 100 == 0)                             // once a second: other instances' saves
+        {
+            const std::string js = fFiles.changes();
+            if (! js.empty())
+                fPage.evaluate(js);
+        }
+        if (fIdleCount % 5 != 0)
             return;
         HostTime h;
         if (! readHostTime(h))
@@ -631,8 +643,9 @@ private:
         }
     }
 
-    // The page and its saved state.
+    // The page and its saved state; Twirl's own files (scenes, My toys…), every instance's.
     TwirlPage fPage;
+    twirl::Files fFiles;
     std::atomic<bool> fPageStopping { false }, fPageSaidReady { false };
     uint32_t fIdleCount = 0;
     mutable std::mutex fSavedMutex;
@@ -652,7 +665,7 @@ private:
             path += "/resources";
         }
         path.urlEncode();
-        fPage.start("file://" + path + "/index.html");
+        fPage.start("file://" + path + "/index.html", fFiles.initialJS());
     }
 
     void restorePage()

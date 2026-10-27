@@ -82,6 +82,23 @@ toggle change; the plugin keeps it as its one state and gives it back when a
 project loads (`twirlRestore`). Checked in Carla: saved from one instance,
 loaded into a fresh one, the tempo and Out came back.
 
+## Scenes, My toys and the look: shared files
+
+In a browser, Twirl keeps its scene slots, My toys and how it looks (the
+level, Numbers, Beats…) in the browser's storage. The plugin's web view
+has none that lasts (Qt 6's default profile is off the record) and none
+shared between instances, so the plugin keeps them as files instead
+(`TwirlFiles.hpp`), every instance's: `$XDG_DATA_HOME/twirl`, else
+`~/.local/share/twirl`: `scenes/Scene 1.json`…, `My toys.json`,
+`settings/….json`, the page's own JSON. The page gets them all before it
+starts (its initial JavaScript), saves with `setState("file", "path\n…")`
+(written whole: a temporary file, renamed), and hears of other instances'
+saves within a second (the plugin looks for changes). A scene file's text
+pastes into Scenes → Paste a code, in the plugin or a browser: a way to
+share one. The sheet itself stays each instance's own, saved with the
+project. Checked in Carla: a save lands on disk, another instance's file is
+picked up, and a fresh instance starts with them.
+
 ## Following the host
 
 `run()` records the host's tempo, whether it's rolling, and its beat at
@@ -225,6 +242,8 @@ and the LV2 in `jalv`: every event within 0.1 ms of Twirl's own timing, sent
   that run plugin UIs apart from the plugin won't show the page.
 - The page tells the host about its own changes only while the window is
   open (they go when it next opens).
+- Scene files are read when an instance starts and whenever one changes;
+  two instances saving the same slot in the same second: the last wins.
 - Drums are General MIDI (kick 36, snare 38, hat 42, shaker 70): Bitwig's
   drum machine needs a note map for now.
 

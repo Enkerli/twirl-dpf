@@ -62,12 +62,13 @@ public:
             fThread.join();
     }
 
-    /** Start the page (once): the web view gets 5 s to come up. */
-    void start(const char* const url)
+    /** Start the page (once): the web view gets 5 s to come up. `js` runs before the page's own. */
+    void start(const char* const url, const std::string& js = std::string())
     {
         if (fThread.joinable() || std::getenv("DISPLAY") == nullptr)
             return;
         fUrl = url;
+        fInitialJS = js;
         fThread = std::thread([this] { run(); });
     }
 
@@ -112,6 +113,7 @@ public:
 private:
     Listener& fListener;
     String fUrl;
+    std::string fInitialJS;      // before the page's own (the plugin's files, TwirlFiles.hpp)
     std::thread fThread;
     std::atomic<bool> fQuit { false }, fReady { false }, fResize { false };
     std::atomic<uint> fWidth { kWidth }, fHeight { kHeight };
@@ -180,10 +182,12 @@ private:
         // What DPF's own web view UI gives a page (sendNote, setState), plus a
         // press taking the keyboard (DPF patch 0003).
         WebViewOptions options(messageCallback, this);
-        options.initialJS = ""
-            "window.setState = function(key, value){ postMessage('setstate ' + key + ' ' + value) };"
-            "window.sendNote = function(channel, note, velocity){ postMessage('sendnote ' + channel + ' ' + note + ' ' + velocity) };"
-            "addEventListener('pointerdown', function(){ postMessage('__dpf_focus') }, true);";
+        const std::string initialJS = std::string()
+            + "window.setState = function(key, value){ postMessage('setstate ' + key + ' ' + value) };"
+            + "window.sendNote = function(channel, note, velocity){ postMessage('sendnote ' + channel + ' ' + note + ' ' + velocity) };"
+            + "addEventListener('pointerdown', function(){ postMessage('__dpf_focus') }, true);"
+            + fInitialJS;
+        options.initialJS = initialJS.c_str();
 
         // The web view's process inherits the environment, set for it alone and
         // put back as soon as it has started:
