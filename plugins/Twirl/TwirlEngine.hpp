@@ -61,6 +61,10 @@ struct ExpRamp {
 };
 
 /** Twirl's env(): from silence up to `peak` in `attack`, then down over `decay`. */
+/** How much longer the note being started rings: Twirl's accents (1 = as made, up to 1.5).
+ *  Set by Engine::play around each note, on the audio thread; every envelope's decay reads it. */
+static double& ringNow() noexcept { static thread_local double r = 1.0; return r; }
+
 struct Env {
     ExpRamp ramp;
     int toDecay = 0;
@@ -72,7 +76,7 @@ struct Env {
         ramp.set(0.0001);
         ramp.rampTo(peak, attack * sr);
         toDecay = static_cast<int>(attack * sr);
-        decaySamples = decay * sr;
+        decaySamples = decay * ringNow() * sr;
     }
     double next() noexcept
     {
@@ -156,7 +160,8 @@ struct NoteSpec {
     float vel;         // 0..1.5
     float pan;         // -1..1
     float y;           // height on the sheet, 0 (top) .. 1
-    float nuance;      // Vary's -1..1
+    float nuance;      // Vary's -1..1 (an accent brightens it)
+    float ring;        // an accent's longer ring, 1..1.5 (0, from an older page: 1)
 };
 
 enum : uint8_t { kPluck = 0, kBell, kBlip, kDrum, kShake };
@@ -283,9 +288,10 @@ public:
     /** Start a note `offset` samples into the next render, in its pack's sound. */
     void play(const NoteSpec& n, const int offset) noexcept
     {
-        if (playPack(n, offset))
-            return;
-        playPaper(n, offset);
+        ringNow() = n.ring > 0.0f ? std::max(1.0f, std::min(2.0f, n.ring)) : 1.0f;
+        if (! playPack(n, offset))
+            playPaper(n, offset);
+        ringNow() = 1.0;
     }
 
     /** Paper's five voices (and every pack's fallback). */

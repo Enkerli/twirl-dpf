@@ -69,6 +69,8 @@ static const ParamSpec kParams[] = {
     { "group_c_mute",  "Group C mute",          kSwitch, 0, 1,    0,    nullptr,    "" },
     { "group_d_level", "Group D level",         kFloat,  0, 1.5f, 1,    nullptr,    "" },
     { "group_d_mute",  "Group D mute",          kSwitch, 0, 1,    0,    nullptr,    "" },
+    // How much a note's place in its loop's cycle shapes it (louder, brighter, longer); as a new sheet's
+    { "accents",       "Accents",               kFloat,  0, 1,    0.3f, nullptr,    "" },
 };
 
 static constexpr uint32_t kParamCount = sizeof(kParams) / sizeof(kParams[0]);
