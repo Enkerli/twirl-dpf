@@ -13,8 +13,9 @@ transport** takes the host's tempo, plays while its transport plays and on
 its beats.
 
 **Twirl keeps playing with its window closed**, and its sheet, Out choice
-and Follow host transport are **saved with the host's project**. Twenty-one of
-its controls are **host parameters**, automatable (below).
+and Follow host transport are **saved with the host's project**. Twenty-nine of
+its controls are **host parameters**, automatable (below), among them a
+level and a mute for each of four groups of loops.
 
 Twirl's page isn't forked: `make` copies `apps/twirl/index.html` from a
 music-suite checkout beside this one (or `MUSIC_SUITE=…`), else downloads it
@@ -185,11 +186,12 @@ versions)").
 
 ## Parameters
 
-Twenty-one of the page's controls are the host's parameters, automatable
+Twenty-nine of the page's controls are the host's parameters, automatable
 and saved with the project (`TwirlParams.hpp`): Volume, Tempo, Follow host
 transport, Swing, Warmth, Air, Drone (on, level, voicing, space), Lock,
 Walk (on, way, pace), Sounds (the pack), Scale, Root, Vary, Evolve, Morph,
-Incoming MIDI only.
+Incoming MIDI only, and the level and mute of Groups A to D (a loop joins
+one in its settings; the group's level multiplies its loops' volume).
 Choices are lists with their names, switches on/off. The page holds the same
 list in the same order (`HOST_PARAMS`); both append only, as hosts keep
 parameters by number.

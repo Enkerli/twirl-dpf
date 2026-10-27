@@ -60,6 +60,15 @@ static const ParamSpec kParams[] = {
     { "evolve",        "Evolve",                kSwitch, 0, 1,    1,    nullptr,    "" },
     { "morph",         "Morph",                 kSwitch, 0, 1,    1,    nullptr,    "" },
     { "midi_in_only",  "Incoming MIDI only",    kSwitch, 0, 1,    0,    nullptr,    "" },   // the sheet silent: an instrument
+    // Groups A to D: the level (times their loops' own volume) and the mute of the loops in each
+    { "group_a_level", "Group A level",         kFloat,  0, 1.5f, 1,    nullptr,    "" },
+    { "group_a_mute",  "Group A mute",          kSwitch, 0, 1,    0,    nullptr,    "" },
+    { "group_b_level", "Group B level",         kFloat,  0, 1.5f, 1,    nullptr,    "" },
+    { "group_b_mute",  "Group B mute",          kSwitch, 0, 1,    0,    nullptr,    "" },
+    { "group_c_level", "Group C level",         kFloat,  0, 1.5f, 1,    nullptr,    "" },
+    { "group_c_mute",  "Group C mute",          kSwitch, 0, 1,    0,    nullptr,    "" },
+    { "group_d_level", "Group D level",         kFloat,  0, 1.5f, 1,    nullptr,    "" },
+    { "group_d_mute",  "Group D mute",          kSwitch, 0, 1,    0,    nullptr,    "" },
 };
 
 static constexpr uint32_t kParamCount = sizeof(kParams) / sizeof(kParams[0]);
