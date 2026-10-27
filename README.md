@@ -156,6 +156,12 @@ a busy sheet in the heaviest pack (Chimes, 50 notes a second, ~120 voices)
 must take under a quarter of one core (it takes about 11 %). It writes
 `build/render/*.wav` for listening.
 
+**Like the page.** `make build/render_notes` builds a renderer that plays
+notes through the engine dry (`setDelayOn(false)`), note by note; music-suite's
+`apps/twirl/tools/compare-engine.mjs` renders the same notes through Twirl's
+page and compares level, brightness and length. All 49 (every pack's five
+voices, the three drums) alike on 2026-10-27.
+
 **Synth mode.** MIDI coming into the plugin is played by the engine too,
 when Out includes sound: channel 1 pluck, 2 bell, 3 blip (these two an
 octave down, as Twirl sends them an octave up), 10 drums and shaker (36

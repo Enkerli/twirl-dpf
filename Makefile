@@ -63,4 +63,10 @@ test:
 	$(CXX) -std=c++17 $(BASE_OPTS) -Wall -Wextra -o build/render_test tests/render_test.cpp
 	./build/render_test
 
+# Note by note, dry, for comparing with the page's own voices
+# (music-suite: node apps/twirl/tools/compare-engine.mjs builds and runs it).
+build/render_notes: tests/render_notes.cpp plugins/Twirl/TwirlEngine.hpp
+	@mkdir -p build
+	$(CXX) -std=c++17 $(BASE_OPTS) -Wall -Wextra -o build/render_notes tests/render_notes.cpp
+
 .PHONY: all patch dgl page plugins gen install clean test

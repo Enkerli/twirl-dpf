@@ -283,6 +283,8 @@ private:
 
 public:
     void setTempo(const double bpm) noexcept { if (bpm > 0) fDelaySeconds = 0.75 * 60.0 / bpm; }
+    /** The delay on (always, in the plugin) or off: dry, to compare with the page's own voices (tests/render_notes.cpp). */
+    void setDelayOn(const bool on) noexcept { fDelayOn = on; }
 
     /** Start a note `offset` samples into the next render. */
     /** Start a note `offset` samples into the next render, in its pack's sound. */
@@ -469,8 +471,8 @@ public:
                 }
 
             // The delay: a dotted eighth, darkened each time round (Twirl's delaySend 0.28, feedback 0.38).
-            const double echoed = fDelayLp.next(fDelay.read(delaySamples));
-            fDelay.write(wet * 0.28 + echoed * 0.38);
+            const double echoed = fDelayOn ? fDelayLp.next(fDelay.read(delaySamples)) : 0.0;
+            if (fDelayOn) fDelay.write(wet * 0.28 + echoed * 0.38);
 
             // The room (Warmth): hiss and crackle into the master, then the whole
             // mix through a drifting delay (wow and flutter), as the page's.
@@ -502,6 +504,7 @@ private:
     Random fRand;
     float fVolumeTarget = 0.8f, fVolume = 0.8f;
     double fDelaySeconds = 0.75 * 60.0 / 96.0;
+    bool fDelayOn = true;
     double fEnvelope = 0.0;
 
     struct DelayLine {
