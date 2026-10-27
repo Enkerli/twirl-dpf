@@ -160,9 +160,14 @@ must take under a quarter of one core (it takes about 11 %). It writes
 when Out includes sound: channel 1 pluck, 2 bell, 3 blip (these two an
 octave down, as Twirl sends them an octave up), 10 drums and shaker (36
 kick, 38 snare, 42 hat, 70 shaker, and General MIDI's neighbours by kind),
-any other channel pluck but 4 (Twirl's Drone, held notes, which Twirl now
-also sends as MIDI: left alone for now); in the sheet's pack, at the event's frame, window
-open or not. Note-offs are ignored: Twirl's voices are one-shots. It still
+any other channel pluck; in the sheet's pack, at the event's frame, window
+open or not. Note-offs are ignored: Twirl's voices are one-shots. Channel 4
+is Twirl's Drone (held notes, as Twirl sends it): the engine plays a second
+Drone of the notes held there (eight at most), at the loudest one's
+velocity as its level, in this sheet's Drone space; note-offs end them,
+and so do All Notes Off and Out without sound. Checked in Carla: three
+notes held on channel 4 into a silent sheet, the output from Warmth's hiss
+(0.005) to 0.06, and back once released. It still
 passes through to the MIDI out. So one Twirl's MIDI into another plays its
 notes in the second's sound. Checked with two standalones: B, with no loops
 of its own, played A's notes in Kalimba while connected, and only Warmth's

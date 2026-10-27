@@ -238,15 +238,22 @@ public:
         fDelayLp.reset();
         fEnvelope = 0.0;
         fDrone.sounding = false;
+        fMidiDrone.sounding = false;
     }
 
     void setVolume(const float v) noexcept { fVolumeTarget = std::max(0.0f, std::min(2.0f, v)); }
     void setWarmth(const float w) noexcept { fWarmth = std::max(0.0f, std::min(1.0f, w)); }
 
     /** The Drone: on, off, its notes (gliding there), its level and space. */
-    void setDrone(const DroneSpec& d) noexcept
+    void setDrone(const DroneSpec& d) noexcept { setDroneOf(fDrone, d); }
+    /** A second Drone, for one coming in as MIDI (synth mode: channel 4's held notes). */
+    void setMidiDrone(const DroneSpec& d) noexcept { setDroneOf(fMidiDrone, d); }
+    bool midiDroneSounding() const noexcept { return fMidiDrone.sounding; }
+
+private:
+    struct Drone;
+    void setDroneOf(Drone& z, const DroneSpec& d) noexcept
     {
-        Drone& z = fDrone;
         const bool fresh = d.on && (! z.sounding || d.count != z.spec.count);
         z.spec = d;
         z.spec.count = std::max(0, std::min(d.count, DroneSpec::kMaxNotes));
@@ -268,6 +275,8 @@ public:
         }
         z.fading = ! d.on;
     }
+
+public:
     void setTempo(const double bpm) noexcept { if (bpm > 0) fDelaySeconds = 0.75 * 60.0 / bpm; }
 
     /** Start a note `offset` samples into the next render. */
@@ -444,11 +453,14 @@ public:
             double dryL = fBusL[k], dryR = fBusR[k], wet = fBusWet[k];
 
             double droneL = 0, droneR = 0;
-            if (fDrone.sounding)
-            {
-                droneTick(droneL, droneR);
-                wet += (droneL + droneR) * 0.5 * 0.35;
-            }
+            for (Drone* const z : { &fDrone, &fMidiDrone })
+                if (z->sounding)
+                {
+                    double l = 0, r = 0;
+                    droneTick(*z, l, r);
+                    droneL += l; droneR += r;
+                    wet += (l + r) * 0.5 * 0.35;
+                }
 
             // The delay: a dotted eighth, darkened each time round (Twirl's delaySend 0.28, feedback 0.38).
             const double echoed = fDelayLp.next(fDelay.read(delaySamples));
@@ -511,13 +523,12 @@ private:
         double lfo = 0, rotor = 0, wob = 0, wobRate = 0.19;
         int every = 0;
         float rd[512] = {}; int rdPos = 0;          // the rotor's moving delay (Doppler), ~10 ms
-    } fDrone;
+    } fDrone, fMidiDrone;
 
     static double droneGain(const float level) noexcept { return std::max(0.0002, 0.1 * level * level); }
 
-    void droneTick(double& outL, double& outR) noexcept
+    void droneTick(Drone& z, double& outL, double& outR) noexcept
     {
-        Drone& z = fDrone;
         const DroneSpec& d = z.spec;
         const double sr = fSr;
         // Level: toward the slider's (or toward silence, fading out over ~1 s).

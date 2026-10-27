@@ -16,8 +16,10 @@
  * MIDI arriving at the plugin (the host's, and the page's sendNote()) is
  * passed through at once, and, when Out includes sound, played by the engine
  * too (synth mode): channel 1 pluck, 2 bell, 3 blip, 10 drums and shaker, any
- * other pluck but 4 (Twirl's Drone, held notes: left alone); in the sheet's pack, at the event's frame. So one Twirl's MIDI
- * into another plays its notes in the second's sound.
+ * other pluck, in the sheet's pack, at the event's frame; channel 4 (Twirl's
+ * Drone, held notes) plays a Drone of its own, its notes the ones held, in
+ * this sheet's Drone space. So one Twirl's MIDI into another plays its notes
+ * in the second's sound.
  *
  * The sound is made here (route C, TwirlEngine.hpp). The page sends each
  * note it would have played, timed like the MIDI: setState("voices",
@@ -447,6 +449,8 @@ protected:
                 {
                     fEngine.setDrone(d);
                     fDroneSeen = seq;
+                    fPageDrone = d;
+                    fDroneHeldChanged = fDroneHeldChanged || fEngine.midiDroneSounding();   // its space, for the MIDI's Drone too
                 }
             }
         }
@@ -476,6 +480,10 @@ protected:
         if (fEngineSound.load(std::memory_order_relaxed))
             for (uint32_t i = 0; i < midiInCount; ++i)
                 synthNote(midiIn[i]);
+        else if (fDroneHeldCount > 0)
+            clearDroneHeld();   // Out without sound: the MIDI's Drone stops too
+        if (fDroneHeldChanged)
+            midiDrone();
         fEngine.render(outputs[0], outputs[1], frames);
 
         // The host's time, for the page: its beat at this block's wall-clock time.
@@ -692,13 +700,21 @@ private:
     std::atomic<bool> fEngineSound { true };
     std::atomic<uint32_t> fMidiInNotes[16] {};   // note-ons coming in, by channel (the page's report)
 
-    /** A note-on coming in, as Twirl would have played it (note-offs: its voices ring out). */
+    /** A note-on coming in, as Twirl would have played it (note-offs: its voices ring out);
+     *  on channel 4, the Drone's held notes. */
     void synthNote(const MidiEvent& ev) noexcept
     {
-        if (ev.size < 3 || (ev.data[0] & 0xF0) != 0x90 || ev.data[2] == 0)
+        if (ev.size < 3)
             return;
-        const uint8_t ch = ev.data[0] & 0x0F, note = ev.data[1] & 0x7F;
-        if (ch == 3)                // Twirl's Drone (held notes): not one-shots; left alone for now
+        const uint8_t kind = ev.data[0] & 0xF0, ch = ev.data[0] & 0x0F, note = ev.data[1] & 0x7F;
+        if (ch == 3)
+        {
+            if (kind == 0x90 && ev.data[2] > 0) droneHold(note, ev.data[2]);
+            else if (kind == 0x80 || kind == 0x90) droneHold(note, 0);
+            else if (kind == 0xB0 && (ev.data[1] == 120 || ev.data[1] == 123)) clearDroneHeld();   // all sound / notes off
+            return;
+        }
+        if (kind != 0x90 || ev.data[2] == 0)
             return;
         twirl::NoteSpec spec { twirl::kPluck, fEnginePack.load(std::memory_order_relaxed), static_cast<float>(note),
                                ev.data[2] / 127.0f, 0.0f, 0.5f, 0.0f };
@@ -719,6 +735,41 @@ private:
         }
         fEngine.play(spec, static_cast<int>(ev.frame));
     }
+    // Channel 4 coming in (synth mode): the notes held, by velocity (0: not held), and a Drone made of them.
+    uint8_t fDroneHeld[128] {};
+    int fDroneHeldCount = 0;
+    bool fDroneHeldChanged = false;
+    twirl::DroneSpec fPageDrone;     // this sheet's own Drone, as last applied: its space
+
+    void droneHold(const uint8_t note, const uint8_t vel) noexcept
+    {
+        if ((fDroneHeld[note] > 0) != (vel > 0)) fDroneHeldCount += vel > 0 ? 1 : -1;
+        if (fDroneHeld[note] != vel) { fDroneHeld[note] = vel; fDroneHeldChanged = true; }
+    }
+    void clearDroneHeld() noexcept
+    {
+        std::memset(fDroneHeld, 0, sizeof(fDroneHeld));
+        fDroneHeldCount = 0;
+        fDroneHeldChanged = true;
+    }
+    /** The notes held, lowest first (eight at most), at the loudest one's level (Twirl sends its level as the velocity). */
+    void midiDrone() noexcept
+    {
+        twirl::DroneSpec d = fPageDrone;
+        d.count = 0;
+        uint8_t loudest = 0;
+        for (int n = 0; n < 128 && d.count < twirl::DroneSpec::kMaxNotes; ++n)
+            if (fDroneHeld[n] > 0)
+            {
+                d.freq[d.count++] = static_cast<float>(440.0 * std::pow(2.0, (n - 69) / 12.0));
+                loudest = std::max(loudest, fDroneHeld[n]);
+            }
+        d.on = d.count > 0;
+        if (d.on) d.level = loudest / 127.0f;
+        fEngine.setMidiDrone(d);
+        fDroneHeldChanged = false;
+    }
+
     std::atomic<uint32_t> fDroneSeq { 0 };
     twirl::DroneSpec fDroneShared;   // written by the page's thread inside the seqlock
     uint32_t fDroneSeen = 0;
