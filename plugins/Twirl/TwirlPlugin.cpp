@@ -16,7 +16,7 @@
  * MIDI arriving at the plugin (the host's, and the page's sendNote()) is
  * passed through at once, and, when Out includes sound, played by the engine
  * too (synth mode): channel 1 pluck, 2 bell, 3 blip, 10 drums and shaker, any
- * other pluck; in the sheet's pack, at the event's frame. So one Twirl's MIDI
+ * other pluck but 4 (Twirl's Drone, held notes: left alone); in the sheet's pack, at the event's frame. So one Twirl's MIDI
  * into another plays its notes in the second's sound.
  *
  * The sound is made here (route C, TwirlEngine.hpp). The page sends each
@@ -676,6 +676,8 @@ private:
         if (ev.size < 3 || (ev.data[0] & 0xF0) != 0x90 || ev.data[2] == 0)
             return;
         const uint8_t ch = ev.data[0] & 0x0F, note = ev.data[1] & 0x7F;
+        if (ch == 3)                // Twirl's Drone (held notes): not one-shots; left alone for now
+            return;
         twirl::NoteSpec spec { twirl::kPluck, fEnginePack.load(std::memory_order_relaxed), static_cast<float>(note),
                                ev.data[2] / 127.0f, 0.0f, 0.5f, 0.0f };
         switch (ch)

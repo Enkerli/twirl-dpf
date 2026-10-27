@@ -107,8 +107,9 @@ ms after they're stamped).
 ## Channels
 
 As in Twirl's Web MIDI output: **pluck 1, bell 2, blip 3, drums and shaker
-10** (General MIDI: kick 36, snare 38, hat 42, shaker 70). Note lengths:
-drums 80 ms, pluck and blip 220, bell 600.
+10** (General MIDI: kick 36, snare 38, hat 42, shaker 70), and **the Drone
+4** (its notes held while it plays, changing as Walk moves them). Note
+lengths: drums 80 ms, pluck and blip 220, bell 600.
 
 ## Twirl's sound, made in the plugin
 
@@ -141,7 +142,8 @@ must take under a quarter of one core (it takes about 11 %). It writes
 when Out includes sound: channel 1 pluck, 2 bell, 3 blip (these two an
 octave down, as Twirl sends them an octave up), 10 drums and shaker (36
 kick, 38 snare, 42 hat, 70 shaker, and General MIDI's neighbours by kind),
-any other channel pluck; in the sheet's pack, at the event's frame, window
+any other channel pluck but 4 (Twirl's Drone, held notes, which Twirl now
+also sends as MIDI: left alone for now); in the sheet's pack, at the event's frame, window
 open or not. Note-offs are ignored: Twirl's voices are one-shots. It still
 passes through to the MIDI out. So one Twirl's MIDI into another plays its
 notes in the second's sound. Checked with two standalones: B, with no loops
