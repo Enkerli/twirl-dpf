@@ -41,7 +41,7 @@ static const char* const kRoots[] = { "C", "C#", "D", "Eb", "E", "F", "F#", "G",
 static const ParamSpec kParams[] = {
     { "volume",        "Volume",                kFloat,  0, 1,    0.8f, nullptr,    "" },
     { "tempo",         "Tempo",                 kInt,    60, 160, 96,   nullptr,    "BPM" },
-    { "follow_host",   "Follow host transport", kSwitch, 0, 1,    0,    nullptr,    "" },
+    { "follow_host",   "Follow host transport", kSwitch, 0, 1,    1,    nullptr,    "" },   // on, as a plugin's clock is
     { "swing",         "Swing",                 kFloat,  0, 0.5f, 0,    nullptr,    "" },
     { "warmth",        "Warmth",                kFloat,  0, 1,    0.5f, nullptr,    "" },
     { "air",           "Air",                   kFloat,  0, 1,    0,    nullptr,    "" },
