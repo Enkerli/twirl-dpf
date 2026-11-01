@@ -165,7 +165,7 @@ struct NoteSpec {
     float nuance;      // Vary's -1..1 (an accent brightens it)
     float ring;        // an accent's longer ring, 1..1.5 (0, from an older page: 1)
     uint8_t shaker;    // the loop's shaker: Twirl's SHAKER_KINDS (egg, maraca, cabasa, tambourine, rain stick)
-    float tone = 0;    // the ground under it: a lowpass on its way out, Hz (0: none; older pages send none)
+    float tone;        // the ground under it: a lowpass on its way out, Hz (0: none; brace-initialized without it, 0)
 };
 
 enum : uint8_t { kPluck = 0, kBell, kBlip, kDrum, kShake };

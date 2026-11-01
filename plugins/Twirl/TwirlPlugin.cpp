@@ -717,7 +717,7 @@ private:
         if (kind != 0x90 || ev.data[2] == 0)
             return;
         twirl::NoteSpec spec { twirl::kPluck, fEnginePack.load(std::memory_order_relaxed), static_cast<float>(note),
-                               ev.data[2] / 127.0f, 0.0f, 0.5f, 0.0f, 1.0f, 0 };
+                               ev.data[2] / 127.0f, 0.0f, 0.5f, 0.0f, 1.0f, 0, 0.0f };   // MIDI in: no ground, no tone
         switch (ch)
         {
         case 1: spec.voice = twirl::kBell; spec.midi -= 12; break; // Twirl sends bell and blip an octave up
