@@ -23,7 +23,7 @@
  *
  * The sound is made here (route C, TwirlEngine.hpp). The page sends each
  * note it would have played, timed like the MIDI: setState("voices",
- * "t,voice,pack,midi,vel,pan,y,nuance,ring,shaker;…"), the volume, tempo and Warmth as
+ * "t,voice,pack,midi,vel,pan,y,nuance,ring,shaker,tone;…"), the volume, tempo and Warmth as
  * setState("engine", "volume,bpm,warmth"), and the Drone as setState("drone",
  * "on,level,side,rate,pan,trem,dop,split,hz,hz…"); the engine plays the notes
  * at their sample offsets. (Until 2026-10-26 the page streamed its own Web
@@ -802,7 +802,7 @@ private:
         fDroneSeq.fetch_add(1, std::memory_order_acq_rel);
     }
 
-    // "t,voice,pack,midi,vel,pan,y,nuance[,ring[,shaker]];…"; anything malformed is skipped.
+    // "t,voice,pack,midi,vel,pan,y,nuance[,ring[,shaker[,tone]]];…"; anything malformed is skipped.
     void parseVoices(const char* s) noexcept
     {
         const ScopedSafeLocale ssl;
@@ -813,6 +813,7 @@ private:
             float midi = 60, vel = 0, pan = 0, y = 0.5f, nuance = 0;
             float ring = 1.0f;
             int more = 0, shaker = 0, more2 = 0;
+            float tone = 0.0f;
             if (std::sscanf(s, "%lf,%d,%d,%f,%f,%f,%f,%f%n", &t, &voice, &pack, &midi, &vel, &pan, &y, &nuance, &used) == 8
                 && voice >= 0 && voice <= 4 && std::isfinite(midi) && vel >= 0.0f)
             {
@@ -820,10 +821,14 @@ private:
                     ring = 1.0f;
                 if (more > 0 && s[used + more] == ',')                                                       // the loop's shaker (newer still)
                     std::sscanf(s + used + more, ",%d%n", &shaker, &more2);
+                if (more2 > 0 && s[used + more + more2] == ',')                                              // the ground's tone (newer still)
+                    if (std::sscanf(s + used + more + more2, ",%f", &tone) != 1 || ! std::isfinite(tone))
+                        tone = 0.0f;
                 fVoiceRing.push({ t, { static_cast<uint8_t>(voice), static_cast<uint8_t>(std::max(0, pack)), midi,
                                        std::min(vel, 1.5f), std::max(-1.0f, std::min(1.0f, pan)), std::max(0.0f, std::min(1.0f, y)),
                                        std::max(-1.0f, std::min(1.0f, nuance)), std::max(1.0f, std::min(2.0f, ring)),
-                                       static_cast<uint8_t>(std::max(0, std::min(twirl::kShakerCount - 1, shaker))) } });
+                                       static_cast<uint8_t>(std::max(0, std::min(twirl::kShakerCount - 1, shaker))),
+                                       tone > 0.0f ? std::max(20.0f, std::min(20000.0f, tone)) : 0.0f } });
             }
             const char* const semi = std::strchr(s, ';');
             if (semi == nullptr)
