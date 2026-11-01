@@ -826,7 +826,7 @@ private:
                         tone = 0.0f;
                 fVoiceRing.push({ t, { static_cast<uint8_t>(voice), static_cast<uint8_t>(std::max(0, pack)), midi,
                                        std::min(vel, 1.5f), std::max(-1.0f, std::min(1.0f, pan)), std::max(0.0f, std::min(1.0f, y)),
-                                       std::max(-1.0f, std::min(1.0f, nuance)), std::max(1.0f, std::min(2.0f, ring)),
+                                       std::max(-1.0f, std::min(1.0f, nuance)), std::max(0.25f, std::min(2.0f, ring)),
                                        static_cast<uint8_t>(std::max(0, std::min(twirl::kShakerCount - 1, shaker))),
                                        tone > 0.0f ? std::max(20.0f, std::min(20000.0f, tone)) : 0.0f } });
             }

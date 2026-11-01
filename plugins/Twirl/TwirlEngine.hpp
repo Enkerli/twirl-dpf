@@ -163,7 +163,7 @@ struct NoteSpec {
     float pan;         // -1..1
     float y;           // height on the sheet, 0 (top) .. 1
     float nuance;      // Vary's -1..1 (an accent brightens it)
-    float ring;        // an accent's longer ring, 1..1.5 (0, from an older page: 1)
+    float ring;        // how long it rings: an accent (up to 1.5), the ground (½ to 2); 0.25..2 (0, from an older page: 1)
     uint8_t shaker;    // the loop's shaker: Twirl's SHAKER_KINDS (egg, maraca, cabasa, tambourine, rain stick)
     float tone;        // the ground under it: a lowpass on its way out, Hz (0: none; brace-initialized without it, 0)
 };
@@ -314,7 +314,7 @@ public:
     /** Start a note `offset` samples into the next render, in its pack's sound. */
     void play(const NoteSpec& n, const int offset) noexcept
     {
-        ringNow() = n.ring > 0.0f ? std::max(1.0f, std::min(2.0f, n.ring)) : 1.0f;
+        ringNow() = n.ring > 0.0f ? std::max(0.25f, std::min(2.0f, n.ring)) : 1.0f;
         toneNow() = n.tone > 0.0f ? n.tone : 0.0;
         if (! playPack(n, offset))
             playPaper(n, offset);
