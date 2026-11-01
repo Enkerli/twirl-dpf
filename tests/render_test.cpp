@@ -60,7 +60,7 @@ int main()
             for (const float midi : pitches)
             {
                 const float y = (n % 3) * 0.33f + 0.1f;
-                NoteSpec spec { static_cast<uint8_t>(voice), static_cast<uint8_t>(pack), midi, vel, (n % 5 - 2) * 0.4f, y, (n % 3 - 1) * 0.5f, 1.0f, 0 };
+                NoteSpec spec { static_cast<uint8_t>(voice), static_cast<uint8_t>(pack), midi, vel, (n % 5 - 2) * 0.4f, y, (n % 3 - 1) * 0.5f, 1.0f, 0, 0.0f };
                 const int at = n * static_cast<int>(0.4 * sr);
                 // render up to this note, then start it
                 while (static_cast<int>(L.size()) + block <= at)
@@ -166,6 +166,46 @@ int main()
     }
 
     // A busy sheet in the heaviest pack: Chimes (bells of five partials ringing
+    // The ground's tone (Twirl's layers): every pack's note goes through it.
+    // A C6 through a 300 Hz tone: all of it above the cutoff, so much quieter
+    // and darker than open (energy, and sample-to-sample change for its highs),
+    // and still sounding.
+    for (int pack = 0; pack < 9; ++pack)
+    {
+        double bright[2] = {}, level[2] = {};
+        for (int toned = 0; toned < 2; ++toned)
+        {
+            engine.setSampleRate(sr);
+            engine.setWarmth(0.0f);
+            engine.setDelayOn(false);
+            NoteSpec spec { kPluck, static_cast<uint8_t>(pack), 84.0f, 0.8f, 0.0f, 0.5f, 0.0f, 1.0f, 0, 0.0f };
+            spec.tone = toned ? 300.0f : 0.0f;
+            engine.play(spec, 0);
+            double prevL = 0;
+            for (int k = 0; k < sr / 2 / block; ++k)
+            {
+                float l[block] = {}, r[block] = {};
+                engine.render(l, r, block);
+                for (int j = 0; j < block; ++j)
+                {
+                    bright[toned] += (l[j] - prevL) * (l[j] - prevL);
+                    level[toned] += static_cast<double>(l[j]) * l[j];
+                    prevL = l[j];
+                }
+            }
+            for (int k = 0; k < 4 * sr / block; ++k)   // let it die away before the next
+            {
+                float l[block] = {}, r[block] = {};
+                engine.render(l, r, block);
+            }
+        }
+        const double ratio = bright[1] / std::max(1e-12, bright[0]), loud = level[1] / std::max(1e-12, level[0]);
+        const bool ok = level[1] > 1e-7 && ratio < 0.15 && loud < 0.5;
+        std::printf("tone     %-8s C6 through 300 Hz: energy %.0f%%, highs %.0f%% of open  %s\n", packs[pack], loud * 100.0, ratio * 100.0, ok ? "ok" : "FAIL");
+        failures += ok ? 0 : 1;
+    }
+    engine.setDelayOn(true);
+
     // 4.5 s), 50 notes a second (Alex's busiest report: 53) across its voices,
     // for 10 s. Must take well under real time: a quarter of one core at most.
     // Then all bells at 60 a second, for information.
@@ -183,7 +223,7 @@ int main()
             for (int note = t * rate / sr; note < (t + block) * rate / sr; ++note)
             {
                 const uint8_t voice = extreme ? 1 : static_cast<uint8_t>(note % 3);   // bell, or pluck, bell, blip
-                NoteSpec spec { voice, 6, 60.0f + (note * 7) % 24, 0.8f, 0.0f, 0.5f, 0.0f, 1.0f, 0 };
+                NoteSpec spec { voice, 6, 60.0f + (note * 7) % 24, 0.8f, 0.0f, 0.5f, 0.0f, 1.0f, 0, 0.0f };
                 engine.play(spec, note * sr / rate - t);
             }
             float l[block] = {}, r[block] = {};

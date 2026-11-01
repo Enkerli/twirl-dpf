@@ -33,7 +33,7 @@ int main(int argc, char** argv)
         engine.setWarmth(0.0f);
         engine.setDelayOn(false);
         engine.setVolume(0.8f);
-        const NoteSpec n { static_cast<uint8_t>(voice), static_cast<uint8_t>(pack), midi, vel, 0.0f, y, 0.0f, 1.0f, static_cast<uint8_t>(shaker) };
+        const NoteSpec n { static_cast<uint8_t>(voice), static_cast<uint8_t>(pack), midi, vel, 0.0f, y, 0.0f, 1.0f, static_cast<uint8_t>(shaker), 0.0f };
         engine.play(n, 0);
         const int frames = static_cast<int>(seconds * sr);
         std::vector<float> L(block), R(block), mono;

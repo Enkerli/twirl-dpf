@@ -64,6 +64,8 @@ struct ExpRamp {
 /** How much longer the note being started rings: Twirl's accents (1 = as made, up to 1.5).
  *  Set by Engine::play around each note, on the audio thread; every envelope's decay reads it. */
 static double& ringNow() noexcept { static thread_local double r = 1.0; return r; }
+// The note being started's tone (Twirl's ground): a lowpass cutoff in Hz, 0 for none.
+static double& toneNow() noexcept { static thread_local double t = 0.0; return t; }
 
 struct Env {
     ExpRamp ramp;
@@ -163,6 +165,7 @@ struct NoteSpec {
     float nuance;      // Vary's -1..1 (an accent brightens it)
     float ring;        // an accent's longer ring, 1..1.5 (0, from an older page: 1)
     uint8_t shaker;    // the loop's shaker: Twirl's SHAKER_KINDS (egg, maraca, cabasa, tambourine, rain stick)
+    float tone;        // the ground under it: a lowpass on its way out, Hz (0: none; brace-initialized without it, 0)
 };
 
 enum : uint8_t { kPluck = 0, kBell, kBlip, kDrum, kShake };
@@ -212,6 +215,8 @@ struct Voice {
     Osc osc1, osc2;
     ExpRamp freq1, freq2, mod, cutoff;
     Biquad f1, f2;
+    Biquad tone;                // the note's tone (Twirl's ground): the page's lowpass in out()
+    bool toned = false;
     Env env1, env2;
     Filter cutType = Filter::Lowpass;
     double cutQ = 1.0;
@@ -310,9 +315,11 @@ public:
     void play(const NoteSpec& n, const int offset) noexcept
     {
         ringNow() = n.ring > 0.0f ? std::max(1.0f, std::min(2.0f, n.ring)) : 1.0f;
+        toneNow() = n.tone > 0.0f ? n.tone : 0.0;
         if (! playPack(n, offset))
             playPaper(n, offset);
         ringNow() = 1.0;
+        toneNow() = 0.0;
     }
 
     /** Paper's five voices (and every pack's fallback). */
@@ -457,6 +464,9 @@ public:
                     }
                     fTmp[k] = x;
                 }
+                if (v.toned)
+                    for (uint32_t k = 0; k < m; ++k)
+                        fTmp[k] = v.tone.next(fTmp[k]);
                 for (uint32_t k = 0; k < m; ++k)
                 {
                     const double x = fTmp[k];
@@ -468,7 +478,7 @@ public:
             }
             for (; i < cn; ++i)
             {
-                const double s = tick(v);
+                const double s = v.toned ? v.tone.next(tick(v)) : tick(v);
                 fBusL[i] += s * gl;
                 fBusR[i] += s * gr;
                 fBusWet[i] += s * gw;
@@ -710,10 +720,18 @@ private:
         for (Voice& v : fVoices)
         {
             if (! v.active)
-                return v;
+            {
+                best = &v;
+                break;
+            }
             if (v.left < best->left)
                 best = &v;
         }
+        // Every voice a note starts carries its tone (a lowpass, Web Audio's default Q of 1 dB), or none.
+        best->toned = toneNow() > 0.0;
+        best->tone.reset();
+        if (best->toned)
+            best->tone.set(Filter::Lowpass, toneNow(), 1.0, fSr);
         return *best;
     }
 

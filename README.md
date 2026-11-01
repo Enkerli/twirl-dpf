@@ -132,7 +132,9 @@ lengths: drums 80 ms, pluck and blip 220, bell 600.
 ## Twirl's sound, made in the plugin
 
 `TwirlEngine.hpp`: the page sends each note as it would have played it
-(voice, sound pack, exact pitch, velocity, pan, height, Vary's nuance), timed
+(voice, sound pack, exact pitch, velocity, pan, height, Vary's nuance, an
+accent's ring, the loop's shaker, and its tone: a lowpass from the ground
+under it, which every voice of every pack goes through), timed
 like the MIDI (`setState("voices", …)`), the volume, tempo and Warmth
 (`"engine"`), and the Drone (`"drone"`: its notes as Walk moves them, its
 level and space); the engine plays the notes at their sample offsets, so the
@@ -150,7 +152,8 @@ sound that close to the current one, as long as it sounds ok."
 
 `make test` renders every pack's every voice at 8 pitches and 4 loudnesses,
 offline (with the plugin's own compiler flags), and fails if one is silent,
-clips, isn't finite or doesn't die away; the Drone (swells, glides to a new
+clips, isn't finite or doesn't die away; a high note through a low tone,
+in every pack, much quieter and darker than open; the Drone (swells, glides to a new
 chord, fades out when off) and Warmth (about -60 dB, silent at 0) too; and
 a busy sheet in the heaviest pack (Chimes, 50 notes a second, ~120 voices)
 must take under a quarter of one core (it takes about 11 %). It writes
