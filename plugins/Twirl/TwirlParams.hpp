@@ -71,6 +71,8 @@ static const ParamSpec kParams[] = {
     { "group_d_mute",  "Group D mute",          kSwitch, 0, 1,    0,    nullptr,    "" },
     // How much a note's place in its loop's cycle shapes it (louder, brighter, longer); as a new sheet's
     { "accents",       "Accents",               kFloat,  0, 1,    0.3f, nullptr,    "" },
+    // The ground (layer 1): how much it colours each note where it sounds (duller on dark, brighter on light); none on a new sheet
+    { "ground",        "Ground",                kFloat,  0, 1,    0,    nullptr,    "" },
 };
 
 static constexpr uint32_t kParamCount = sizeof(kParams) / sizeof(kParams[0]);
