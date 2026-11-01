@@ -197,12 +197,14 @@ versions)").
 
 ## Parameters
 
-Twenty-nine of the page's controls are the host's parameters, automatable
+Thirty-one of the page's controls are the host's parameters, automatable
 and saved with the project (`TwirlParams.hpp`): Volume, Tempo, Follow host
 transport, Swing, Warmth, Air, Drone (on, level, voicing, space), Lock,
 Walk (on, way, pace), Sounds (the pack), Scale, Root, Vary, Evolve, Morph,
-Incoming MIDI only, and the level and mute of Groups A to D (a loop joins
-one in its settings; the group's level multiplies its loops' volume).
+Incoming MIDI only, the level and mute of Groups A to D (a loop joins
+one in its settings; the group's level multiplies its loops' volume),
+Accents, and Ground (how much the sheet's ground colours its notes). The
+changed-parameter masks are 32 bits: one more fits, then they widen.
 Choices are lists with their names, switches on/off. The page holds the same
 list in the same order (`HOST_PARAMS`); both append only, as hosts keep
 parameters by number.
